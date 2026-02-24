@@ -336,7 +336,7 @@ st.markdown("---")
 
 scan_col1, scan_col2, scan_col3 = st.columns([1, 1, 2])
 
-is_running = workflow and workflow["status"] in ("in_progress", "queued")
+is_running = bool(workflow and workflow.get("status") in ("in_progress", "queued"))
 
 with scan_col1:
     if st.button("🚀 Avvia Scansione", type="primary", use_container_width=True, disabled=is_running):
