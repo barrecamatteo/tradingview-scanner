@@ -119,10 +119,30 @@ def get_workflow_status() -> dict:
                     "status": run["status"],
                     "conclusion": run.get("conclusion"),
                     "created_at": run["created_at"],
+                    "id": run["id"],
                 }
         return None
     except Exception:
         return None
+
+
+def cancel_workflow(run_id: int) -> bool:
+    """Cancel a running GitHub Actions workflow."""
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        return False
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs/{run_id}/cancel"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    try:
+        response = requests.post(url, headers=headers)
+        return response.status_code == 202
+    except Exception:
+        return False
 
 
 def get_scan_dates(db) -> list:
@@ -314,26 +334,38 @@ st.markdown("---")
 
 # ── Scan Button ───────────────────────────────────────────────────────────
 
-scan_col1, scan_col2 = st.columns([1, 3])
+scan_col1, scan_col2, scan_col3 = st.columns([1, 1, 2])
+
+is_running = workflow and workflow["status"] in ("in_progress", "queued")
 
 with scan_col1:
-    if st.button("🚀 Avvia Scansione", type="primary", use_container_width=True):
+    if st.button("🚀 Avvia Scansione", type="primary", use_container_width=True, disabled=is_running):
         if trigger_github_scan():
             st.success(
                 "✅ Scansione avviata su GitHub Actions! "
                 "I risultati appariranno qui tra circa 45-60 minuti."
             )
+            st.rerun()
         else:
             st.error("❌ Impossibile avviare la scansione.")
 
 with scan_col2:
+    if is_running:
+        if st.button("⏹ Ferma Scansione", type="secondary", use_container_width=True):
+            if cancel_workflow(workflow["id"]):
+                st.success("✅ Scansione fermata!")
+                st.rerun()
+            else:
+                st.error("❌ Impossibile fermare la scansione.")
+
+with scan_col3:
     if last_scan:
         status_icon = "✅" if last_scan["status"] == "completed" else "⏳"
         st.info(
             f"{status_icon} Ultima scansione: {last_scan.get('successful', 0)} riuscite, "
             f"{last_scan.get('failed', 0)} fallite"
         )
-    if workflow and workflow["status"] == "in_progress":
+    if is_running:
         st.warning("⏳ Scansione GitHub in corso... Ricarica la pagina tra qualche minuto.")
 
 # ── Load Data Based on Selected Date ──────────────────────────────────────
