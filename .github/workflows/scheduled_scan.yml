@@ -4,7 +4,7 @@ on:
   # Manual trigger
   workflow_dispatch:
 
-  # Scheduled: Every Monday at 06:00 UTC
+  # Scheduled: Every Monday at 06:00 UTC (07:00 Rome)
   schedule:
     - cron: '0 6 * * 1'
 
@@ -13,12 +13,12 @@ env:
   TV_PASSWORD: ${{ secrets.TV_PASSWORD }}
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
   SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  TV_COOKIES: ${{ secrets.TV_COOKIES }}
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Checkout code
@@ -41,6 +41,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+
+      - name: Restore cookies
+        run: |
+          mkdir -p data
+          echo "$TV_COOKIES" | base64 -d > data/tv_cookies.json
+          echo "Cookies restored to data/tv_cookies.json"
 
       - name: Run scan
         run: |
