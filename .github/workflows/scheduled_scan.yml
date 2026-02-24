@@ -1,0 +1,55 @@
+name: Scheduled TradingView Scan
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+
+  # Scheduled: Every Monday at 06:00 UTC
+  schedule:
+    - cron: '0 6 * * 1'
+
+env:
+  TV_USERNAME: ${{ secrets.TV_USERNAME }}
+  TV_PASSWORD: ${{ secrets.TV_PASSWORD }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install ChromeDriver
+        uses: nanasess/setup-chromedriver@v2
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run scan
+        run: |
+          python run_scan.py
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-screenshots
+          path: data/screenshots/
+          retention-days: 7
