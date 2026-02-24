@@ -185,12 +185,34 @@ def pivot_history_data(history_data: list) -> list:
         if row["cont_rate"] is not None:
             asset_data[key][row["timeframe"]] = float(row["cont_rate"])
 
-    # Calculate averages
-    for asset in asset_data.values():
-        values = [v for v in [asset["4H"], asset["1H"], asset["15min"]] if v is not None]
-        asset["avg"] = round(sum(values) / len(values), 1) if values else None
-
     return sorted(asset_data.values(), key=lambda x: (x["category"], x["asset"]))
+
+
+def get_top_rates(df, threshold=67.5) -> pd.DataFrame:
+    """
+    Extract individual asset/timeframe combinations above threshold.
+    Returns a DataFrame with columns: Asset, Categoria, Timeframe, Cont. Rate
+    """
+    rows = []
+    for _, row in df.iterrows():
+        for tf in ["4H", "1H", "15min"]:
+            if tf in row and pd.notna(row[tf]) and row[tf] is not None:
+                val = float(row[tf])
+                if val >= threshold:
+                    rows.append({
+                        "Asset": row["asset"],
+                        "Categoria": row["category"],
+                        "Timeframe": tf,
+                        "Cont. Rate": f"{val:.1f}%",
+                        "_sort_val": val,
+                    })
+
+    if not rows:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    result = result.sort_values("_sort_val", ascending=False).drop(columns=["_sort_val"])
+    return result.reset_index(drop=True)
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────
@@ -198,10 +220,8 @@ def pivot_history_data(history_data: list) -> list:
 db = get_db()
 
 with st.sidebar:
-    # User info
     st.markdown("### 👤 MBARRECA")
 
-    # API status
     if db:
         st.markdown("✅ Database OK")
     else:
@@ -219,14 +239,12 @@ with st.sidebar:
     # ── Calendar / Date Picker ────────────────────────────────────────
     st.markdown("### 📅 Storico Analisi")
 
-    # Get available scan dates
     scan_dates = []
     if db:
         scan_dates = get_scan_dates(db)
 
     available_dates = [s["date"] for s in scan_dates]
 
-    # Date picker
     selected_date = st.date_input(
         "Seleziona data",
         value=date.today(),
@@ -234,7 +252,6 @@ with st.sidebar:
         format="DD/MM/YYYY",
     )
 
-    # Show if selected date has data
     if selected_date in available_dates:
         scan_info = next(s for s in scan_dates if s["date"] == selected_date)
         st.success(f"✅ Analisi disponibile ({scan_info['successful']} asset)")
@@ -243,24 +260,21 @@ with st.sidebar:
     else:
         st.warning("⚠️ Nessuna analisi per questa data")
 
-    # Show calendar legend with available dates
     if scan_dates:
         st.markdown("---")
         st.markdown("**📋 Date disponibili:**")
-        for s in scan_dates[:10]:  # Show last 10
+        for s in scan_dates[:10]:
             d = s["date"].strftime("%d/%m/%Y")
             st.caption(f"🟢 {d} — {s['successful']} riuscite, {s['failed']} fallite")
 
     st.markdown("---")
 
-    # Quick navigation
     if st.button("📍 Vai a Oggi", use_container_width=True):
         st.session_state.selected_date = date.today()
         st.rerun()
 
     st.markdown("---")
 
-    # Asset list
     st.markdown("### 📋 Asset Monitorati")
     for cat, assets_list in ASSETS.items():
         with st.expander(f"{cat} ({len(assets_list)})"):
@@ -326,20 +340,17 @@ with scan_col2:
 
 st.markdown("## 📊 Continuation Rates")
 
-# Determine which data to show
 data = None
 showing_date = None
 
 if db:
     if selected_date == date.today():
-        # Show latest data from current rates table
         try:
             data = db.get_rates_pivot()
             showing_date = "più recenti"
         except Exception as e:
             logger.warning(f"Errore: {e}")
     else:
-        # Show historical data for selected date
         history = get_history_for_date(db, selected_date)
         if history:
             data = pivot_history_data(history)
@@ -353,28 +364,26 @@ if showing_date:
 if data:
     df = pd.DataFrame(data)
 
+    # Remove avg column if present (from db pivot)
+    if "avg" in df.columns:
+        df = df.drop(columns=["avg"])
+
     # ── Filters ───────────────────────────────────────────────────────
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    filter_col1, filter_col2 = st.columns(2)
 
     with filter_col1:
         categories = ["Tutti"] + sorted(df["category"].unique().tolist())
         selected_cat = st.selectbox("Filtra per Categoria", categories)
 
     with filter_col2:
-        min_rate = st.slider("Media Minima (%)", 0.0, 100.0, 0.0, 0.5)
-
-    with filter_col3:
         sort_by = st.selectbox(
             "Ordina per",
-            ["Categoria", "Asset", "4H", "1H", "15min", "Media (desc)", "Media (asc)"],
+            ["Categoria", "Asset", "4H", "1H", "15min"],
         )
 
     # Apply filters
     if selected_cat != "Tutti":
         df = df[df["category"] == selected_cat]
-
-    if min_rate > 0:
-        df = df[df["avg"].fillna(0) >= min_rate]
 
     # Apply sorting
     sort_map = {
@@ -383,8 +392,6 @@ if data:
         "4H": ("4H", False),
         "1H": ("1H", False),
         "15min": ("15min", False),
-        "Media (desc)": ("avg", False),
-        "Media (asc)": ("avg", True),
     }
     sort_col, sort_asc = sort_map.get(sort_by, ("category", True))
     df = df.sort_values(sort_col, ascending=sort_asc, na_position="last")
@@ -393,12 +400,7 @@ if data:
 
     display_df = df.copy()
 
-    # Rename columns
-    col_rename = {
-        "category": "Categoria",
-        "asset": "Asset",
-        "avg": "Media",
-    }
+    col_rename = {"category": "Categoria", "asset": "Asset"}
     if "updated_at" in display_df.columns:
         col_rename["updated_at"] = "Ultimo Agg."
     if "scanned_at" in display_df.columns:
@@ -406,12 +408,10 @@ if data:
 
     display_df.rename(columns=col_rename, inplace=True)
 
-    # Format percentage columns
-    for col in ["4H", "1H", "15min", "Media"]:
+    for col in ["4H", "1H", "15min"]:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(format_rate)
 
-    # Format timestamp
     if "Ultimo Agg." in display_df.columns:
         display_df["Ultimo Agg."] = display_df["Ultimo Agg."].apply(
             lambda x: str(x)[:16].replace("T", " ") if x else "—"
@@ -427,43 +427,31 @@ if data:
             "4H": st.column_config.TextColumn(width="small"),
             "1H": st.column_config.TextColumn(width="small"),
             "15min": st.column_config.TextColumn(width="small"),
-            "Media": st.column_config.TextColumn(width="small"),
             "Ultimo Agg.": st.column_config.TextColumn(width="medium"),
         },
     )
 
-    # ── Summary Stats ─────────────────────────────────────────────────
-    st.markdown("### 📈 Statistiche Riassuntive")
+    # ── Top Performers (>67.5%) ───────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🏆 Top Continuation Rates (≥ 67.5%)")
 
-    stats_col1, stats_col2, stats_col3 = st.columns(3)
+    top_rates = get_top_rates(df, threshold=67.5)
 
-    with stats_col1:
-        avg_4h = df["4H"].dropna().mean()
-        st.metric("Media 4H", f"{avg_4h:.1f}%" if pd.notna(avg_4h) else "—")
-
-    with stats_col2:
-        avg_1h = df["1H"].dropna().mean()
-        st.metric("Media 1H", f"{avg_1h:.1f}%" if pd.notna(avg_1h) else "—")
-
-    with stats_col3:
-        avg_15 = df["15min"].dropna().mean()
-        st.metric("Media 15min", f"{avg_15:.1f}%" if pd.notna(avg_15) else "—")
-
-    # ── Top/Bottom performers ─────────────────────────────────────────
-    if "avg" in df.columns and df["avg"].notna().any():
-        perf_col1, perf_col2 = st.columns(2)
-
-        with perf_col1:
-            st.markdown("#### 🏆 Top 5 (per Media)")
-            top5 = df.nlargest(5, "avg")[["asset", "category", "avg"]]
-            top5["avg"] = top5["avg"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(top5, hide_index=True, use_container_width=True)
-
-        with perf_col2:
-            st.markdown("#### ⚠️ Bottom 5 (per Media)")
-            bottom5 = df.nsmallest(5, "avg")[["asset", "category", "avg"]]
-            bottom5["avg"] = bottom5["avg"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(bottom5, hide_index=True, use_container_width=True)
+    if not top_rates.empty:
+        st.dataframe(
+            top_rates,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Asset": st.column_config.TextColumn(width="small"),
+                "Categoria": st.column_config.TextColumn(width="medium"),
+                "Timeframe": st.column_config.TextColumn(width="small"),
+                "Cont. Rate": st.column_config.TextColumn(width="small"),
+            },
+        )
+        st.caption(f"Trovati **{len(top_rates)}** combinazioni con Cont. Rate ≥ 67.5%")
+    else:
+        st.info("Nessuna combinazione asset/timeframe supera il 67.5%")
 
     # ── Export ────────────────────────────────────────────────────────
     st.markdown("---")
