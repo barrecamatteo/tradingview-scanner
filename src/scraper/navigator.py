@@ -178,106 +178,133 @@ class ChartNavigator:
             logger.error(f"Error opening Data Window: {e}")
             return False
 
-    def get_cont_rate_from_dom(self) -> Tuple[Optional[float], float]:
+    def get_cont_rate_from_dom(
+        self, max_wait: int = 20, poll_interval: float = 2.0
+    ) -> Tuple[Optional[float], float]:
         """Extract Continuation Rate value directly from Data Window DOM.
 
-        This reads the value from the HTML element instead of using OCR,
-        providing 100% accuracy and ~50x speed improvement.
+        Polls the DOM repeatedly until the value appears or timeout is reached.
+        TradingView indicators can take 5-15 seconds to populate after chart load.
+
+        Args:
+            max_wait: Maximum seconds to wait for the value to appear.
+            poll_interval: Seconds between each poll attempt.
 
         Returns:
             Tuple of (cont_rate, confidence).
             cont_rate is None if extraction fails.
             confidence is 1.0 for DOM extraction (always accurate).
         """
+        import math
+        attempts = math.ceil(max_wait / poll_interval)
+
+        for attempt in range(attempts):
+            value_text = self._find_cont_rate_in_dom()
+
+            if value_text:
+                cont_rate = self._parse_cont_rate(value_text)
+                if cont_rate is not None:
+                    logger.info(
+                        f"DOM extraction: Continuation Rate = {cont_rate} "
+                        f"(found after {attempt * poll_interval:.0f}s)"
+                    )
+                    return cont_rate, 1.0
+                else:
+                    logger.warning(
+                        f"Found text '{value_text}' but could not parse as number"
+                    )
+                    return None, 0.0
+
+            if attempt < attempts - 1:
+                logger.debug(
+                    f"Continuation Rate not in DOM yet, "
+                    f"retry {attempt + 1}/{attempts}..."
+                )
+                time.sleep(poll_interval)
+
+        logger.warning(
+            f"Could not find Continuation Rate in Data Window DOM "
+            f"after {max_wait}s"
+        )
+        return None, 0.0
+
+    def _find_cont_rate_in_dom(self) -> Optional[str]:
+        """Search for Continuation Rate value text in the Data Window DOM.
+
+        Returns the raw text value if found, None otherwise.
+        """
         try:
-            # Primary method: Find by text content "Continuation Rate"
-            # Structure:
-            # <div class="item-_gbYDtbd">
-            #   <div class="itemTitle-_gbYDtbd" data-test-id="value-title">
-            #     Continuation Rate
-            #   </div>
-            #   <div>
-            #     <span style="color: rgb(41, 98, 255);">64.674</span>
-            #   </div>
-            # </div>
-
-            value_text = None
-
             # Strategy 1: XPath - find label then get sibling value
+            # <div class="itemTitle-_gbYDtbd">Continuation Rate</div>
+            # <div><span>64.674</span></div>
             try:
                 value_span = self.driver.find_element(
                     By.XPATH,
                     "//div[contains(text(), 'Continuation Rate')]"
                     "/following-sibling::div/span"
                 )
-                value_text = value_span.text.strip()
+                text = value_span.text.strip()
+                if text:
+                    return text
             except NoSuchElementException:
                 pass
 
             # Strategy 2: Try with partial class name match
-            if not value_text:
-                try:
-                    value_span = self.driver.find_element(
-                        By.XPATH,
-                        "//div[contains(@class, 'itemTitle') and "
-                        "contains(text(), 'Continuation Rate')]"
-                        "/following-sibling::div/span"
-                    )
-                    value_text = value_span.text.strip()
-                except NoSuchElementException:
-                    pass
+            try:
+                value_span = self.driver.find_element(
+                    By.XPATH,
+                    "//div[contains(@class, 'itemTitle') and "
+                    "contains(text(), 'Continuation Rate')]"
+                    "/following-sibling::div/span"
+                )
+                text = value_span.text.strip()
+                if text:
+                    return text
+            except NoSuchElementException:
+                pass
 
             # Strategy 3: Find via data-test-id attribute
-            if not value_text:
-                try:
-                    titles = self.driver.find_elements(
-                        By.CSS_SELECTOR, "[data-test-id*='value-title']"
-                    )
-                    for title in titles:
-                        if "Continuation Rate" in title.text:
-                            parent = title.find_element(By.XPATH, "..")
-                            span = parent.find_element(By.CSS_SELECTOR, "div > span")
-                            value_text = span.text.strip()
-                            break
-                except (NoSuchElementException, StaleElementReferenceException):
-                    pass
+            try:
+                titles = self.driver.find_elements(
+                    By.CSS_SELECTOR, "[data-test-id*='value-title']"
+                )
+                for title in titles:
+                    if "Continuation Rate" in title.text:
+                        parent = title.find_element(By.XPATH, "..")
+                        span = parent.find_element(
+                            By.CSS_SELECTOR, "div > span"
+                        )
+                        text = span.text.strip()
+                        if text:
+                            return text
+            except (NoSuchElementException, StaleElementReferenceException):
+                pass
 
-            # Strategy 4: Search all spans for a number near the expected range
-            if not value_text:
-                try:
-                    items = self.driver.find_elements(
-                        By.CSS_SELECTOR, "[class*='item-']"
-                    )
-                    for item in items:
-                        try:
-                            title_div = item.find_element(
-                                By.CSS_SELECTOR, "[class*='itemTitle']"
-                            )
-                            if "Continuation Rate" in title_div.text:
-                                span = item.find_element(By.CSS_SELECTOR, "span")
-                                value_text = span.text.strip()
-                                break
-                        except NoSuchElementException:
-                            continue
-                except Exception:
-                    pass
+            # Strategy 4: Search all item containers
+            try:
+                items = self.driver.find_elements(
+                    By.CSS_SELECTOR, "[class*='item-']"
+                )
+                for item in items:
+                    try:
+                        title_div = item.find_element(
+                            By.CSS_SELECTOR, "[class*='itemTitle']"
+                        )
+                        if "Continuation Rate" in title_div.text:
+                            span = item.find_element(By.CSS_SELECTOR, "span")
+                            text = span.text.strip()
+                            if text:
+                                return text
+                    except NoSuchElementException:
+                        continue
+            except Exception:
+                pass
 
-            if not value_text:
-                logger.warning("Could not find Continuation Rate in Data Window DOM")
-                return None, 0.0
-
-            # Parse the value
-            cont_rate = self._parse_cont_rate(value_text)
-            if cont_rate is not None:
-                logger.info(f"DOM extraction: Continuation Rate = {cont_rate}")
-                return cont_rate, 1.0  # 100% confidence for DOM extraction
-            else:
-                logger.warning(f"Could not parse Continuation Rate value: '{value_text}'")
-                return None, 0.0
+            return None
 
         except Exception as e:
-            logger.error(f"DOM extraction error: {e}")
-            return None, 0.0
+            logger.error(f"DOM search error: {e}")
+            return None
 
     def _parse_cont_rate(self, text: str) -> Optional[float]:
         """Parse continuation rate from text string.
