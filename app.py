@@ -4,7 +4,6 @@ TradingView Continuation Rate Scanner - Streamlit Web App
 
 import os
 import sys
-import time
 import logging
 import pandas as pd
 import streamlit as st
@@ -13,7 +12,6 @@ from datetime import datetime, timezone
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.scanner import TradingViewScanner
 from src.database.supabase_client import SupabaseDB
 from src.config.assets import ASSETS, TIMEFRAMES, get_total_combinations
 
@@ -27,7 +25,7 @@ st.set_page_config(
     page_title="TV Continuation Rate Scanner",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ── Logging ───────────────────────────────────────────────────────────
@@ -43,17 +41,15 @@ st.markdown("""
         color: #1f77b4;
         margin-bottom: 0.5rem;
     }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem 1.5rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-    }
 
     /* Table styling */
     .dataframe td { text-align: center !important; }
     .dataframe th { text-align: center !important; background-color: #1f2937 !important; }
+
+    /* Equal width columns for Top CR tables */
+    .top-cr-table th, .top-cr-table td {
+        width: 33.33% !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -95,54 +91,6 @@ def get_last_scan_date(db, timeframes):
     return "Mai"
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.markdown("## ⚙️ Configuration")
-
-    st.markdown("### 🔑 Credentials")
-
-    # Check for environment variables
-    tv_user = os.getenv("TV_USERNAME", "")
-    tv_pass = os.getenv("TV_PASSWORD", "")
-
-    if not tv_user:
-        tv_user = st.text_input("TradingView Username", type="default")
-    if not tv_pass:
-        tv_pass = st.text_input("TradingView Password", type="password")
-
-    st.markdown("---")
-
-    st.markdown("### 🔧 Scan Settings")
-
-    extraction_method = st.selectbox(
-        "Extraction Method",
-        ["csv", "ocr", "ai_vision"],
-        help="CSV downloads chart data (fastest, 100% accurate). "
-             "OCR uses EasyOCR. AI Vision uses Claude API.",
-    )
-
-    headless_mode = st.checkbox("Headless Mode", value=True, help="Run browser without GUI")
-
-    # Timeframe selection for manual scan
-    st.markdown("### 📐 Timeframes")
-    scan_tfs = st.multiselect(
-        "Select timeframes to scan",
-        ALL_TF_LABELS,
-        default=ALL_TF_LABELS,
-    )
-
-    st.markdown("---")
-
-    st.markdown("### 📋 Assets")
-    total = get_total_combinations()
-    st.metric("Total Combinations (all TF)", f"{total}")
-
-    for cat, assets_list in ASSETS.items():
-        with st.expander(f"{cat} ({len(assets_list)})"):
-            for a in assets_list:
-                st.text(f"  {a['name']}")
-
 # ── Main Content ──────────────────────────────────────────────────────
 
 st.markdown('<div class="main-header">📊 Continuation Rates</div>', unsafe_allow_html=True)
@@ -165,77 +113,7 @@ with col4:
 
 st.markdown("---")
 
-# ── Scan Controls ─────────────────────────────────────────────────────
-
-scan_col1, scan_col2 = st.columns([1, 3])
-
-with scan_col1:
-    scan_button = st.button("🔄 Aggiorna Dati", type="primary", use_container_width=True)
-
-with scan_col2:
-    last_scan = None
-    if db:
-        try:
-            last_scan = db.get_last_scan()
-        except Exception:
-            pass
-    if last_scan:
-        status_icon = "✅" if last_scan["status"] == "completed" else "⚠️"
-        st.info(
-            f"{status_icon} Last scan: {last_scan.get('successful', 0)} successful, "
-            f"{last_scan.get('failed', 0)} failed"
-        )
-
-# ── Run Scan ──────────────────────────────────────────────────────────
-
-if scan_button:
-    if not tv_user or not tv_pass:
-        st.error("⚠️ Please provide TradingView credentials in the sidebar.")
-    elif not scan_tfs:
-        st.error("⚠️ Please select at least one timeframe.")
-    else:
-        os.environ["TV_USERNAME"] = tv_user
-        os.environ["TV_PASSWORD"] = tv_pass
-
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        log_container = st.expander("📋 Scan Log", expanded=True)
-
-        def progress_callback(current, total, message):
-            progress = current / total if total > 0 else 0
-            progress_bar.progress(progress)
-            status_text.text(f"[{current}/{total}] {message}")
-            with log_container:
-                st.text(f"{datetime.now().strftime('%H:%M:%S')} | {message}")
-
-        try:
-            scanner = TradingViewScanner(
-                headless=headless_mode,
-                extraction_method=extraction_method,
-                use_database=db is not None,
-                timeframe_filter=scan_tfs,
-            )
-            scanner.set_progress_callback(progress_callback)
-
-            with st.spinner("🔄 Scanning in progress..."):
-                results = scanner.run_full_scan()
-
-            st.success(
-                f"✅ Scan complete! "
-                f"{len([r for r in results if r.status == 'success'])} "
-                f"successful extractions."
-            )
-
-            st.session_state.scan_results = scanner.get_results_as_pivot()
-            st.rerun()
-
-        except Exception as e:
-            st.error(f"❌ Scan failed: {str(e)}")
-            logger.exception("Scan failed")
-
 # ── Results Table ─────────────────────────────────────────────────────
-
-st.markdown("## 📊 Continuation Rates")
 
 data = None
 
@@ -244,9 +122,6 @@ if db:
         data = db.get_rates_pivot()
     except Exception as e:
         logger.warning(f"Could not load from database: {e}")
-
-if not data and "scan_results" in st.session_state:
-    data = st.session_state.scan_results
 
 if data:
     df = pd.DataFrame(data)
@@ -295,7 +170,7 @@ if data:
         "asset": "Asset",
     }, inplace=True)
 
-    # Format ALL percentage columns (including 5min and 1min)
+    # Format ALL percentage columns
     for col in ALL_TF_LABELS:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(format_rate)
@@ -316,21 +191,6 @@ if data:
         column_config=col_config,
     )
 
-    # ── Summary Stats ─────────────────────────────────────────────
-    st.markdown("### 📈 Summary Statistics")
-
-    stat_cols = st.columns(len(ALL_TF_LABELS))
-    for i, tf in enumerate(ALL_TF_LABELS):
-        with stat_cols[i]:
-            if tf in df.columns:
-                avg_val = df[tf].dropna().mean()
-                st.metric(
-                    f"Avg {tf}",
-                    f"{avg_val:.1f}%" if pd.notna(avg_val) else "—"
-                )
-            else:
-                st.metric(f"Avg {tf}", "—")
-
     # ── Top Continuation Rate (>= 67%) per timeframe ──────────────
     st.markdown("### 🏆 Top Continuation Rate (≥ 67%)")
 
@@ -346,7 +206,16 @@ if data:
                     tf: "Cont. Rate"
                 }, inplace=True)
                 st.markdown(f"**{tf}**")
-                st.dataframe(top_df, hide_index=True, use_container_width=True)
+                st.dataframe(
+                    top_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Asset": st.column_config.TextColumn(width="large"),
+                        "Categoria": st.column_config.TextColumn(width="large"),
+                        "Cont. Rate": st.column_config.TextColumn(width="large"),
+                    },
+                )
             else:
                 st.markdown(f"**{tf}** — Nessun asset ≥ 67%")
 
@@ -362,8 +231,7 @@ if data:
 
 else:
     st.info(
-        "📭 No data yet. Click **🔄 Aggiorna Dati** to run your first scan, "
-        "or configure the database to load saved results."
+        "📭 Nessun dato. Le scansioni automatiche popoleranno questa pagina."
     )
 
 # ── History Chart (if database connected) ─────────────────────────────
