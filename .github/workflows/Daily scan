@@ -1,0 +1,66 @@
+name: Daily Scan (5min/1min)
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      timeframes:
+        description: 'Timeframes to scan (space-separated)'
+        required: false
+        default: '5min 1min'
+
+  # Scheduled: Mon-Wed-Fri at 06:00 UTC (07:00 Rome)
+  schedule:
+    - cron: '0 6 * * 1,3,5'
+
+env:
+  TV_USERNAME: ${{ secrets.TV_USERNAME }}
+  TV_PASSWORD: ${{ secrets.TV_PASSWORD }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  TV_COOKIES: ${{ secrets.TV_COOKIES }}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install ChromeDriver
+        uses: nanasess/setup-chromedriver@v2
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Restore cookies
+        run: |
+          mkdir -p data
+          echo "$TV_COOKIES" | base64 -d > data/tv_cookies.json
+          echo "Cookies restored to data/tv_cookies.json"
+
+      - name: Run daily scan (5min/1min)
+        run: |
+          python run_scan.py --timeframes ${{ github.event.inputs.timeframes || '5min 1min' }} --method dom
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-scan-screenshots
+          path: data/screenshots/
+          retention-days: 7
