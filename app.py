@@ -4,34 +4,23 @@ TradingView Continuation Rate Scanner - Streamlit Web App
 
 import os
 import sys
+import time
 import logging
-import requests
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timezone, timedelta, date
-
-# Load Streamlit Cloud secrets into environment variables
-try:
-    for key in ["SUPABASE_URL", "SUPABASE_KEY", "GITHUB_TOKEN"]:
-        if key in st.secrets and not os.getenv(key):
-            os.environ[key] = st.secrets[key]
-except Exception:
-    pass
-
-# Load .env file for local development
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from datetime import datetime, timezone
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from src.scanner import TradingViewScanner
 from src.database.supabase_client import SupabaseDB
 from src.config.assets import ASSETS, TIMEFRAMES, get_total_combinations
 
-# ── Page Config ───────────────────────────────────────────────────────────
+# All timeframe labels in display order
+ALL_TF_LABELS = ["4H", "1H", "15min", "5min", "1min"]
+
+# ── Page Config ───────────────────────────────────────────────────────
 st.set_page_config(
     page_title="TV Continuation Rate Scanner",
     page_icon="📊",
@@ -39,13 +28,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Logging ───────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-GITHUB_REPO = "barrecamatteo/tradingview-scanner"
-GITHUB_WORKFLOW = "scheduled_scan.yml"
-
-# ── Custom CSS ────────────────────────────────────────────────────────────
+# ── Custom CSS ────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .main-header {
@@ -54,351 +41,124 @@ st.markdown("""
         color: #1f77b4;
         margin-bottom: 0.5rem;
     }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1rem 1.5rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+    }
+    .rate-high { background-color: #28a745 !important; color: white; }
+    .rate-medium { background-color: #ffc107 !important; color: black; }
+    .rate-low { background-color: #dc3545 !important; color: white; }
+
+    /* Table styling */
     .dataframe td { text-align: center !important; }
-    .dataframe th { text-align: center !important; }
+    .dataframe th { text-align: center !important; background-color: #1f2937 !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── Helper Functions ──────────────────────────────────────────────────────
+# ── Helper Functions ──────────────────────────────────────────────────
 
 def get_db() -> SupabaseDB:
+    """Get or create Supabase client from session state."""
     if "db" not in st.session_state:
         try:
             st.session_state.db = SupabaseDB()
         except ValueError as e:
-            st.error(f"⚠️ Database non configurato: {e}")
+            st.error(f"⚠️ Database not configured: {e}")
+            st.info("Set SUPABASE_URL and SUPABASE_KEY in your environment or .env file.")
             return None
     return st.session_state.db
 
 
+def color_rate(val):
+    """Color code continuation rate values."""
+    if pd.isna(val) or val is None:
+        return "background-color: #6c757d; color: white"
+    val = float(val)
+    if val >= 65:
+        return "background-color: #28a745; color: white"
+    elif val >= 55:
+        return "background-color: #ffc107; color: black"
+    else:
+        return "background-color: #dc3545; color: white"
+
+
 def format_rate(val):
+    """Format rate value with percentage sign."""
     if pd.isna(val) or val is None:
         return "—"
     return f"{float(val):.1f}%"
 
 
-def trigger_github_scan() -> bool:
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        st.error("⚠️ GITHUB_TOKEN non configurato nei Secrets.")
-        return False
-
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW}/dispatches"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json={"ref": "main"})
-        return response.status_code == 204
-    except Exception as e:
-        st.error(f"Errore: {e}")
-        return False
-
-
-def get_workflow_status() -> dict:
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        return None
-
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW}/runs"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-
-    try:
-        response = requests.get(url, headers=headers, params={"per_page": 1})
-        if response.status_code == 200:
-            runs = response.json().get("workflow_runs", [])
-            if runs:
-                run = runs[0]
-                return {
-                    "status": run["status"],
-                    "conclusion": run.get("conclusion"),
-                    "created_at": run["created_at"],
-                    "id": run["id"],
-                }
-        return None
-    except Exception:
-        return None
-
-
-def cancel_workflow(run_id: int) -> bool:
-    """Cancel a running GitHub Actions workflow."""
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        return False
-
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs/{run_id}/cancel"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-
-    try:
-        response = requests.post(url, headers=headers)
-        return response.status_code == 202
-    except Exception:
-        return False
-
-
-def get_scan_dates(db) -> list:
-    """Get all dates that have scan data."""
-    try:
-        result = db.client.table("scan_log") \
-            .select("started_at, successful, failed, status") \
-            .eq("status", "completed") \
-            .order("started_at", desc=True) \
-            .execute()
-
-        dates = []
-        for row in result.data:
-            dt = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
-            dates.append({
-                "date": dt.date(),
-                "datetime": row["started_at"],
-                "successful": row.get("successful", 0),
-                "failed": row.get("failed", 0),
-            })
-        return dates
-    except Exception:
-        return []
-
-
-def get_history_for_date(db, target_date: date) -> list:
-    """Get all scan results for a specific date from history table."""
-    try:
-        start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0)
-        end = start + timedelta(days=1)
-
-        result = db.client.table("continuation_rates_history") \
-            .select("*") \
-            .gte("scanned_at", start.isoformat()) \
-            .lt("scanned_at", end.isoformat()) \
-            .order("scanned_at", desc=True) \
-            .execute()
-
-        return result.data
-    except Exception as e:
-        logger.warning(f"Errore caricamento storico: {e}")
-        return []
-
-
-def pivot_history_data(history_data: list) -> list:
-    """Convert flat history records into pivot format (one row per asset)."""
-    asset_data = {}
-
-    for row in history_data:
-        key = row["asset"]
-        if key not in asset_data:
-            asset_data[key] = {
-                "asset": row["asset"],
-                "category": row["category"],
-                "4H": None,
-                "1H": None,
-                "15min": None,
-                "scanned_at": row["scanned_at"],
-            }
-        if row["cont_rate"] is not None:
-            asset_data[key][row["timeframe"]] = float(row["cont_rate"])
-
-    return sorted(asset_data.values(), key=lambda x: (x["category"], x["asset"]))
-
-
-def get_top_rates(df, threshold=67.5) -> pd.DataFrame:
-    """
-    Extract individual asset/timeframe combinations above threshold.
-    Returns a DataFrame with columns: Asset, Categoria, Timeframe, Cont. Rate
-    """
-    rows = []
-    for _, row in df.iterrows():
-        for tf in ["4H", "1H", "15min"]:
-            if tf in row and pd.notna(row[tf]) and row[tf] is not None:
-                val = float(row[tf])
-                if val >= threshold:
-                    rows.append({
-                        "Asset": row["asset"],
-                        "Categoria": row["category"],
-                        "Timeframe": tf,
-                        "Cont. Rate": f"{val:.1f}%",
-                        "_sort_val": val,
-                    })
-
-    if not rows:
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-    result = result.sort_values("_sort_val", ascending=False).drop(columns=["_sort_val"])
-    return result.reset_index(drop=True)
-
-
-# ── Sidebar ───────────────────────────────────────────────────────────────
-
-db = get_db()
+# ── Sidebar ───────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("### 👤 MBARRECA")
+    st.markdown("## ⚙️ Configuration")
 
-    if db:
-        st.markdown("✅ Database OK")
-    else:
-        st.markdown("❌ Database non connesso")
+    st.markdown("### 🔑 Credentials")
 
-    workflow = get_workflow_status()
-    if workflow:
-        if workflow["status"] == "in_progress":
-            st.markdown("⏳ Scansione in corso...")
-        else:
-            st.markdown("✅ API GitHub OK")
+    # Check for environment variables
+    tv_user = os.getenv("TV_USERNAME", "")
+    tv_pass = os.getenv("TV_PASSWORD", "")
+    sb_url = os.getenv("SUPABASE_URL", "")
+    sb_key = os.getenv("SUPABASE_KEY", "")
+
+    if not tv_user:
+        tv_user = st.text_input("TradingView Username", type="default")
+    if not tv_pass:
+        tv_pass = st.text_input("TradingView Password", type="password")
 
     st.markdown("---")
 
-    # ── Calendar / Date Picker ────────────────────────────────────────
-    st.markdown("### 📅 Storico Analisi")
+    st.markdown("### 🔧 Scan Settings")
 
-    scan_dates = []
-    if db:
-        scan_dates = get_scan_dates(db)
-
-    available_dates = [s["date"] for s in scan_dates]
-
-    # ── Month navigation ──────────────────────────────────────────────
-    import calendar
-
-    if "cal_year" not in st.session_state:
-        st.session_state.cal_year = date.today().year
-    if "cal_month" not in st.session_state:
-        st.session_state.cal_month = date.today().month
-
-    nav_col1, nav_col2, nav_col3 = st.columns([1, 3, 1])
-    with nav_col1:
-        if st.button("◀", key="prev_month", use_container_width=True):
-            if st.session_state.cal_month == 1:
-                st.session_state.cal_month = 12
-                st.session_state.cal_year -= 1
-            else:
-                st.session_state.cal_month -= 1
-            st.rerun()
-    with nav_col2:
-        month_names_it = ["", "Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
-                          "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
-        st.markdown(
-            f"<div style='text-align:center; font-weight:bold; font-size:1.1em;'>"
-            f"{month_names_it[st.session_state.cal_month]} {st.session_state.cal_year}</div>",
-            unsafe_allow_html=True,
-        )
-    with nav_col3:
-        if st.button("▶", key="next_month", use_container_width=True):
-            if st.session_state.cal_month == 12:
-                st.session_state.cal_month = 1
-                st.session_state.cal_year += 1
-            else:
-                st.session_state.cal_month += 1
-            st.rerun()
-
-    # ── Build calendar HTML ───────────────────────────────────────────
-    cal = calendar.Calendar(firstweekday=0)  # Monday first
-    month_days = cal.monthdayscalendar(st.session_state.cal_year, st.session_state.cal_month)
-    today = date.today()
-
-    cal_html = """
-    <style>
-    .cal-table { width: 100%; border-collapse: collapse; margin: 5px 0; }
-    .cal-table th { color: #888; font-size: 0.75em; font-weight: 600; padding: 4px 0; text-align: center; }
-    .cal-table td { text-align: center; padding: 3px 0; font-size: 0.85em; }
-    .cal-day { width: 28px; height: 28px; line-height: 28px; margin: auto; border-radius: 50%; }
-    .cal-today { background-color: #4A9EE5; color: white; font-weight: bold; }
-    .cal-saved { background-color: #48C78E; color: white; font-weight: bold; }
-    .cal-empty { color: #ccc; }
-    .cal-normal { color: #333; }
-    .cal-legend { display: flex; align-items: center; justify-content: center; gap: 15px; margin: 8px 0; font-size: 0.75em; color: #888; }
-    .cal-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 4px; }
-    .cal-dot-green { background-color: #48C78E; }
-    .cal-dot-blue { background-color: #4A9EE5; }
-    </style>
-    <table class="cal-table">
-    <tr><th>Lu</th><th>Ma</th><th>Me</th><th>Gi</th><th>Ve</th><th>Sa</th><th>Do</th></tr>
-    """
-
-    for week in month_days:
-        cal_html += "<tr>"
-        for day in week:
-            if day == 0:
-                cal_html += '<td><div class="cal-day cal-empty"></div></td>'
-            else:
-                d = date(st.session_state.cal_year, st.session_state.cal_month, day)
-                if d == today and d in available_dates:
-                    cls = "cal-saved"
-                elif d == today:
-                    cls = "cal-today"
-                elif d in available_dates:
-                    cls = "cal-saved"
-                else:
-                    cls = "cal-normal"
-                cal_html += f'<td><div class="cal-day {cls}">{day}</div></td>'
-        cal_html += "</tr>"
-
-    cal_html += "</table>"
-    cal_html += """
-    <div class="cal-legend">
-        <span><span class="cal-dot cal-dot-green"></span>Analisi salvata</span>
-        <span><span class="cal-dot cal-dot-blue"></span>Oggi</span>
-    </div>
-    """
-
-    st.markdown(cal_html, unsafe_allow_html=True)
-
-    # ── Dropdown: Carica analisi ──────────────────────────────────────
-    st.markdown("")
-    st.markdown("📋 **Carica analisi:**")
-
-    date_options = ["-- Seleziona data --"]
-    date_map = {}
-    for s in scan_dates:
-        label = s["date"].strftime("%d/%m/%Y") + f" ({s['successful']} asset)"
-        date_options.append(label)
-        date_map[label] = s["date"]
-
-    selected_option = st.selectbox(
-        "Carica analisi",
-        date_options,
-        key="date_selector",
-        label_visibility="collapsed",
+    extraction_method = st.selectbox(
+        "Extraction Method",
+        ["dom", "ocr", "ai_vision"],
+        help="DOM reads from Data Window (fastest, 100% accurate). "
+             "OCR uses EasyOCR. AI Vision uses Claude API.",
     )
 
-    if selected_option != "-- Seleziona data --":
-        selected_date = date_map[selected_option]
-    else:
-        selected_date = date.today()
+    headless_mode = st.checkbox("Headless Mode", value=True, help="Run browser without GUI")
 
-    # ── Vai a Oggi button ─────────────────────────────────────────────
-    st.markdown("")
-    if st.button("📍 Vai a Oggi", use_container_width=True):
-        st.session_state.date_selector = "-- Seleziona data --"
-        st.session_state.cal_year = date.today().year
-        st.session_state.cal_month = date.today().month
-        st.rerun()
+    # Timeframe selection for manual scan
+    st.markdown("### 📐 Timeframes")
+    scan_tfs = st.multiselect(
+        "Select timeframes to scan",
+        ALL_TF_LABELS,
+        default=ALL_TF_LABELS,
+    )
 
     st.markdown("---")
 
-    st.markdown("### 📋 Asset Monitorati")
+    st.markdown("### 📋 Assets")
+    total = get_total_combinations()
+    st.metric("Total Combinations (all TF)", f"{total}")
+
     for cat, assets_list in ASSETS.items():
         with st.expander(f"{cat} ({len(assets_list)})"):
             for a in assets_list:
                 st.text(f"  {a['name']}")
 
+    st.markdown("---")
+    st.markdown("### 📖 Database Schema")
+    if st.button("Show SQL Schema"):
+        db = get_db()
+        if db:
+            st.code(db.get_schema_sql(), language="sql")
 
-# ── Main Content ──────────────────────────────────────────────────────────
+# ── Main Content ──────────────────────────────────────────────────────
 
 st.markdown('<div class="main-header">📊 TradingView Continuation Rate Scanner</div>', unsafe_allow_html=True)
-st.markdown("Scansione automatica dei Continuation Rate SMC su 25 asset × 3 timeframe")
+st.markdown("Automated extraction of SMC Continuation Rates across 25 assets × 5 timeframes")
 
 # Top metrics row
 col1, col2, col3, col4 = st.columns(4)
 
+db = get_db()
 last_scan = None
 if db:
     try:
@@ -407,199 +167,236 @@ if db:
         pass
 
 with col1:
-    st.metric("Asset", len([a for cat in ASSETS.values() for a in cat]))
+    st.metric("Assets", len([a for cat in ASSETS.values() for a in cat]))
 with col2:
-    st.metric("Timeframe", len(TIMEFRAMES))
+    st.metric("Timeframes", len(TIMEFRAMES))
 with col3:
-    st.metric("Combinazioni", get_total_combinations())
+    st.metric("Total Scans", get_total_combinations())
 with col4:
     if last_scan and last_scan.get("completed_at"):
         ts = last_scan["completed_at"][:16].replace("T", " ")
-        st.metric("Ultimo Aggiornamento", ts)
+        st.metric("Last Update", ts)
     else:
-        st.metric("Ultimo Aggiornamento", "Mai")
+        st.metric("Last Update", "Never")
 
 st.markdown("---")
 
-# ── Scan Button ───────────────────────────────────────────────────────────
+# ── Scan Controls ─────────────────────────────────────────────────────
 
-scan_col1, scan_col2, scan_col3 = st.columns([1, 1, 2])
-
-is_running = bool(workflow and workflow.get("status") in ("in_progress", "queued"))
+scan_col1, scan_col2 = st.columns([1, 3])
 
 with scan_col1:
-    if st.button("🚀 Avvia Scansione", type="primary", use_container_width=True, disabled=is_running):
-        if trigger_github_scan():
-            st.success(
-                "✅ Scansione avviata su GitHub Actions! "
-                "I risultati appariranno qui tra circa 45-60 minuti."
-            )
-            st.rerun()
-        else:
-            st.error("❌ Impossibile avviare la scansione.")
+    scan_button = st.button("🔄 Aggiorna Dati", type="primary", use_container_width=True)
 
 with scan_col2:
-    if is_running:
-        if st.button("⏹ Ferma Scansione", type="secondary", use_container_width=True):
-            if cancel_workflow(workflow["id"]):
-                st.success("✅ Scansione fermata!")
-                st.rerun()
-            else:
-                st.error("❌ Impossibile fermare la scansione.")
-
-with scan_col3:
     if last_scan:
-        status_icon = "✅" if last_scan["status"] == "completed" else "⏳"
+        status_icon = "✅" if last_scan["status"] == "completed" else "⚠️"
         st.info(
-            f"{status_icon} Ultima scansione: {last_scan.get('successful', 0)} riuscite, "
-            f"{last_scan.get('failed', 0)} fallite"
+            f"{status_icon} Last scan: {last_scan.get('successful', 0)} successful, "
+            f"{last_scan.get('failed', 0)} failed"
         )
-    if is_running:
-        st.warning("⏳ Scansione GitHub in corso... Ricarica la pagina tra qualche minuto.")
 
-# ── Load Data Based on Selected Date ──────────────────────────────────────
+# ── Run Scan ──────────────────────────────────────────────────────────
+
+if scan_button:
+    if not tv_user or not tv_pass:
+        st.error("⚠️ Please provide TradingView credentials in the sidebar.")
+    elif not scan_tfs:
+        st.error("⚠️ Please select at least one timeframe.")
+    else:
+        # Set credentials as env vars for the scanner
+        os.environ["TV_USERNAME"] = tv_user
+        os.environ["TV_PASSWORD"] = tv_pass
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        log_container = st.expander("📋 Scan Log", expanded=True)
+
+        def progress_callback(current, total, message):
+            progress = current / total if total > 0 else 0
+            progress_bar.progress(progress)
+            status_text.text(f"[{current}/{total}] {message}")
+            with log_container:
+                st.text(f"{datetime.now().strftime('%H:%M:%S')} | {message}")
+
+        try:
+            scanner = TradingViewScanner(
+                headless=headless_mode,
+                extraction_method=extraction_method,
+                use_database=db is not None,
+                timeframe_filter=scan_tfs,
+            )
+            scanner.set_progress_callback(progress_callback)
+
+            with st.spinner("🔄 Scanning in progress..."):
+                results = scanner.run_full_scan()
+
+            st.success(
+                f"✅ Scan complete! "
+                f"{len([r for r in results if r.status == 'success'])} "
+                f"successful extractions."
+            )
+
+            # Store results in session state for display
+            st.session_state.scan_results = scanner.get_results_as_pivot()
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"❌ Scan failed: {str(e)}")
+            logger.exception("Scan failed")
+
+# ── Results Table ─────────────────────────────────────────────────────
 
 st.markdown("## 📊 Continuation Rates")
 
+# Try to load from database first, then from session state
 data = None
-showing_date = None
 
 if db:
-    if selected_date == date.today():
-        try:
-            data = db.get_rates_pivot()
-            showing_date = "più recenti"
-        except Exception as e:
-            logger.warning(f"Errore: {e}")
-    else:
-        history = get_history_for_date(db, selected_date)
-        if history:
-            data = pivot_history_data(history)
-            showing_date = selected_date.strftime("%d/%m/%Y")
-        else:
-            st.warning(f"⚠️ Nessun dato trovato per il {selected_date.strftime('%d/%m/%Y')}")
+    try:
+        data = db.get_rates_pivot()
+    except Exception as e:
+        logger.warning(f"Could not load from database: {e}")
 
-if showing_date:
-    st.caption(f"📅 Dati: **{showing_date}**")
+if not data and "scan_results" in st.session_state:
+    data = st.session_state.scan_results
 
 if data:
     df = pd.DataFrame(data)
 
-    # Remove avg column if present (from db pivot)
-    if "avg" in df.columns:
-        df = df.drop(columns=["avg"])
-
-    # ── Filters ───────────────────────────────────────────────────────
-    filter_col1, filter_col2 = st.columns(2)
+    # ── Filters ───────────────────────────────────────────────────
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
 
     with filter_col1:
-        categories = ["Tutti"] + sorted(df["category"].unique().tolist())
-        selected_cat = st.selectbox("Filtra per Categoria", categories)
+        categories = ["All"] + sorted(df["category"].unique().tolist())
+        selected_cat = st.selectbox("Filter by Category", categories)
 
     with filter_col2:
-        sort_by = st.selectbox(
-            "Ordina per",
-            ["Categoria", "Asset", "4H", "1H", "15min"],
-        )
+        min_rate = st.slider("Min Avg Rate (%)", 0.0, 100.0, 0.0, 0.5)
+
+    with filter_col3:
+        sort_options = ["Category", "Asset"] + ALL_TF_LABELS + ["Avg (desc)", "Avg (asc)"]
+        sort_by = st.selectbox("Sort by", sort_options)
 
     # Apply filters
-    if selected_cat != "Tutti":
+    if selected_cat != "All":
         df = df[df["category"] == selected_cat]
+
+    if min_rate > 0:
+        df = df[df["avg"].fillna(0) >= min_rate]
 
     # Apply sorting
     sort_map = {
-        "Categoria": ("category", True),
+        "Category": ("category", True),
         "Asset": ("asset", True),
-        "4H": ("4H", False),
-        "1H": ("1H", False),
-        "15min": ("15min", False),
+        "Avg (desc)": ("avg", False),
+        "Avg (asc)": ("avg", True),
     }
+    # Add timeframe sorts
+    for tf in ALL_TF_LABELS:
+        sort_map[tf] = (tf, False)
+
     sort_col, sort_asc = sort_map.get(sort_by, ("category", True))
-    df = df.sort_values(sort_col, ascending=sort_asc, na_position="last")
+    if sort_col in df.columns:
+        df = df.sort_values(sort_col, ascending=sort_asc, na_position="last")
 
-    # ── Display Table ─────────────────────────────────────────────────
+    # ── Display Table ─────────────────────────────────────────────
 
+    # Format for display
     display_df = df.copy()
+    rename_map = {
+        "category": "Category",
+        "asset": "Asset",
+        "avg": "Average",
+        "updated_at": "Last Update",
+    }
+    # Keep timeframe column names as-is
+    display_df.rename(columns=rename_map, inplace=True)
 
-    col_rename = {"category": "Categoria", "asset": "Asset"}
-    if "updated_at" in display_df.columns:
-        col_rename["updated_at"] = "Ultimo Agg."
-    if "scanned_at" in display_df.columns:
-        col_rename["scanned_at"] = "Ultimo Agg."
-
-    display_df.rename(columns=col_rename, inplace=True)
-
-    for col in ["4H", "1H", "15min"]:
+    # Format percentage columns
+    rate_cols = ALL_TF_LABELS + ["Average"]
+    for col in rate_cols:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(format_rate)
 
-    if "Ultimo Agg." in display_df.columns:
-        display_df["Ultimo Agg."] = display_df["Ultimo Agg."].apply(
+    # Format timestamp
+    if "Last Update" in display_df.columns:
+        display_df["Last Update"] = display_df["Last Update"].apply(
             lambda x: str(x)[:16].replace("T", " ") if x else "—"
         )
 
+    # Build column config
+    col_config = {
+        "Category": st.column_config.TextColumn(width="medium"),
+        "Asset": st.column_config.TextColumn(width="small"),
+        "Average": st.column_config.TextColumn(width="small"),
+    }
+    for tf in ALL_TF_LABELS:
+        if tf in display_df.columns:
+            col_config[tf] = st.column_config.TextColumn(width="small")
+
+    # Style the dataframe
     st.dataframe(
         display_df,
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "Categoria": st.column_config.TextColumn(width="medium"),
-            "Asset": st.column_config.TextColumn(width="small"),
-            "4H": st.column_config.TextColumn(width="small"),
-            "1H": st.column_config.TextColumn(width="small"),
-            "15min": st.column_config.TextColumn(width="small"),
-            "Ultimo Agg.": st.column_config.TextColumn(width="medium"),
-        },
+        column_config=col_config,
     )
 
-    # ── Top Performers (>67.5%) ───────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### 🏆 Top Continuation Rates (≥ 67.5%)")
+    # ── Summary Stats ─────────────────────────────────────────────
+    st.markdown("### 📈 Summary Statistics")
 
-    top_rates = get_top_rates(df, threshold=67.5)
+    # Show stats for all available timeframes
+    stat_cols = st.columns(len(ALL_TF_LABELS))
+    for i, tf in enumerate(ALL_TF_LABELS):
+        with stat_cols[i]:
+            if tf in df.columns:
+                avg_val = df[tf].dropna().mean()
+                st.metric(
+                    f"Avg {tf}",
+                    f"{avg_val:.1f}%" if pd.notna(avg_val) else "—"
+                )
+            else:
+                st.metric(f"Avg {tf}", "—")
 
-    if not top_rates.empty:
-        # Calculate height to fit all rows (35px per row + 38px header)
-        table_height = 38 + len(top_rates) * 35 + 2
-        st.dataframe(
-            top_rates,
-            use_container_width=True,
-            hide_index=True,
-            height=table_height,
-            column_config={
-                "Asset": st.column_config.TextColumn(width="small"),
-                "Categoria": st.column_config.TextColumn(width="medium"),
-                "Timeframe": st.column_config.TextColumn(width="small"),
-                "Cont. Rate": st.column_config.TextColumn(width="small"),
-            },
-        )
-        st.caption(f"Trovati **{len(top_rates)}** combinazioni con Cont. Rate ≥ 67.5%")
-    else:
-        st.info("Nessuna combinazione asset/timeframe supera il 67.5%")
+    # ── Top/Bottom performers ─────────────────────────────────────
+    if "avg" in df.columns and df["avg"].notna().any():
+        perf_col1, perf_col2 = st.columns(2)
 
-    # ── Export ────────────────────────────────────────────────────────
+        with perf_col1:
+            st.markdown("#### 🏆 Top 5 (by Average)")
+            top5 = df.nlargest(5, "avg")[["asset", "category", "avg"]]
+            top5["avg"] = top5["avg"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(top5, hide_index=True, use_container_width=True)
+
+        with perf_col2:
+            st.markdown("#### ⚠️ Bottom 5 (by Average)")
+            bottom5 = df.nsmallest(5, "avg")[["asset", "category", "avg"]]
+            bottom5["avg"] = bottom5["avg"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(bottom5, hide_index=True, use_container_width=True)
+
+    # ── Export ────────────────────────────────────────────────────
     st.markdown("---")
     csv = df.to_csv(index=False)
     st.download_button(
-        "📥 Scarica CSV",
+        "📥 Download CSV",
         data=csv,
         file_name=f"continuation_rates_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
     )
 
 else:
-    if not showing_date or showing_date == "più recenti":
-        st.info(
-            "📭 Nessun dato disponibile. Clicca **🚀 Avvia Scansione** per lanciare "
-            "la prima raccolta dati."
-        )
+    st.info(
+        "📭 No data yet. Click **🔄 Aggiorna Dati** to run your first scan, "
+        "or configure the database to load saved results."
+    )
 
-# ── History Chart ─────────────────────────────────────────────────────────
+# ── History Chart (if database connected) ─────────────────────────────
 
 if db:
     try:
         st.markdown("---")
-        st.markdown("## 📉 Storico Variazioni")
+        st.markdown("## 📉 Historical Trends")
 
         hist_col1, hist_col2 = st.columns(2)
 
@@ -607,75 +404,35 @@ if db:
             all_assets = sorted(
                 set(a["name"] for cat in ASSETS.values() for a in cat)
             )
-            hist_asset = st.selectbox("Seleziona Asset", all_assets, key="hist_asset")
+            hist_asset = st.selectbox("Select Asset", all_assets, key="hist_asset")
 
         with hist_col2:
-            hist_tf = st.selectbox("Seleziona Timeframe", list(TIMEFRAMES.keys()), key="hist_tf")
+            hist_tf = st.selectbox(
+                "Select Timeframe", ALL_TF_LABELS, key="hist_tf"
+            )
 
         history = db.get_history(asset=hist_asset, timeframe=hist_tf, limit=50)
 
         if history:
-            import altair as alt
-
             hist_df = pd.DataFrame(history)
             hist_df["scanned_at"] = pd.to_datetime(hist_df["scanned_at"])
-            hist_df["cont_rate"] = hist_df["cont_rate"].astype(float)
+            hist_df = hist_df.sort_values("scanned_at")
 
-            # Filter out OCR errors (values below 40% are almost certainly wrong)
-            hist_df = hist_df[hist_df["cont_rate"] >= 40.0]
-
-            if not hist_df.empty:
-                hist_df = hist_df.sort_values("scanned_at")
-
-                # Keep only one entry per day (the latest scan of each day)
-                hist_df["scan_date"] = hist_df["scanned_at"].dt.date
-                hist_df = hist_df.drop_duplicates(subset=["scan_date"], keep="last")
-
-                # Format date for tooltip
-                hist_df["data"] = hist_df["scanned_at"].dt.strftime("%d/%m/%Y")
-
-                # Y-axis: tight range around actual values
-                y_min = max(40, hist_df["cont_rate"].min() - 3)
-                y_max = min(100, hist_df["cont_rate"].max() + 3)
-                y_max = max(y_max, y_min + 5)
-
-                # Build chart
-                base = alt.Chart(hist_df).encode(
-                    x=alt.X("scan_date:T",
-                             title="Data",
-                             axis=alt.Axis(
-                                 format="%d/%m",
-                                 labelAngle=-45,
-                                 tickCount="week",
-                             )),
-                    y=alt.Y("cont_rate:Q",
-                             title="Cont. Rate (%)",
-                             scale=alt.Scale(domain=[y_min, y_max])),
-                    tooltip=[
-                        alt.Tooltip("data:N", title="Data"),
-                        alt.Tooltip("cont_rate:Q", title="Cont. Rate", format=".1f"),
-                    ],
-                )
-
-                chart = (
-                    base.mark_line(color="#4A9EE5", strokeWidth=2, interpolate="monotone")
-                    + base.mark_circle(color="#4A9EE5", size=80, filled=True)
-                )
-
-                st.altair_chart(chart, use_container_width=True)
-            else:
-                st.info("I dati disponibili sembrano contenere errori OCR. Nessun valore valido (≥40%) trovato.")
-
+            st.line_chart(
+                hist_df.set_index("scanned_at")["cont_rate"],
+                use_container_width=True,
+            )
         else:
-            st.info("Nessun dato storico disponibile per questo asset/timeframe.")
+            st.info("No historical data available yet for this asset/timeframe.")
     except Exception:
         pass
 
-# ── Footer ────────────────────────────────────────────────────────────────
+# ── Footer ────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #6c757d; font-size: 0.8rem;'>"
-    "TradingView Continuation Rate Scanner | SMC Market Structure Analysis"
+    "TradingView Continuation Rate Scanner | SMC Market Structure Analysis | "
+    "DOM Extraction v2.0"
     "</div>",
     unsafe_allow_html=True,
 )
