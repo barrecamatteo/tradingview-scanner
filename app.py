@@ -191,6 +191,42 @@ if data:
         column_config=col_config,
     )
 
+    # ── Trading session info per asset (for 5min/1min tables) ────────
+    TRADING_SESSIONS = {
+        # Major Forex
+        "EURUSD": ("14:00 - 18:00", "Overlap EU/US: massima liquidità. Segue i dati macro USA."),
+        "GBPUSD": ("14:00 - 18:00", "Overlap EU/US: massima liquidità. Segue i dati macro USA."),
+        "USDCHF": ("14:00 - 18:00", "Overlap EU/US: massima liquidità. Segue i dati macro USA."),
+        # Cross Europei
+        "EURGBP": ("09:00 - 12:00", "Sessione Londra: movimenti tecnici e puliti. Spesso laterale nel pomeriggio."),
+        "EURCHF": ("09:00 - 12:00", "Sessione Londra: movimenti tecnici e puliti. Spesso laterale nel pomeriggio."),
+        "GBPCHF": ("09:00 - 12:00", "Sessione Londra: movimenti tecnici e puliti. Spesso laterale nel pomeriggio."),
+        "CADCHF": ("09:00 - 12:00", "Sessione Londra: movimenti tecnici e puliti. Spesso laterale nel pomeriggio."),
+        # Yen Crosses
+        "USDJPY": ("09:00-11:00 / 15:30-18:00", "Mattina segue flussi EU. Pomeriggio reagisce a Risk-On/Off azionario."),
+        "GBPJPY": ("09:00-11:00 / 15:30-18:00", "Mattina segue flussi EU. Pomeriggio reagisce a Risk-On/Off azionario."),
+        "EURJPY": ("09:00-11:00 / 15:30-18:00", "Mattina segue flussi EU. Pomeriggio reagisce a Risk-On/Off azionario."),
+        "AUDJPY": ("09:00-11:00 / 15:30-18:00", "Mattina segue flussi EU. Pomeriggio reagisce a Risk-On/Off azionario."),
+        "CADJPY": ("09:00-11:00 / 15:30-18:00", "Mattina segue flussi EU. Pomeriggio reagisce a Risk-On/Off azionario."),
+        # Commodity FX
+        "AUDUSD": ("09:00 - 10:30", "London Fade: spesso inverte il movimento fatto in Asia."),
+        "AUDCAD": ("09:00 - 10:30", "London Fade: spesso inverte il movimento fatto in Asia."),
+        "AUDCHF": ("09:00 - 10:30", "London Fade: spesso inverte il movimento fatto in Asia."),
+        "GBPAUD": ("09:00 - 10:30", "London Fade: spesso inverte il movimento fatto in Asia."),
+        "EURAUD": ("09:00 - 10:30", "London Fade: spesso inverte il movimento fatto in Asia."),
+        "EURCAD": ("09:00 - 10:30", "London Fade: spesso inverte il movimento fatto in Asia."),
+        "GBPCAD": ("09:00 - 10:30", "London Fade: spesso inverte il movimento fatto in Asia."),
+        # Metalli
+        "XAUUSD": ("14:30 - 18:30", "Reagisce al Dollaro e inflazione USA. Molto nervoso."),
+        "XAGUSD": ("14:30 - 18:30", "Reagisce al Dollaro e inflazione USA. Molto nervoso."),
+        "XPTUSD": ("14:30 - 18:30", "Reagisce al Dollaro e inflazione USA. Molto nervoso."),
+        # Indici
+        "SPX500": ("15:30 - 22:00", "Apertura Wall Street. Evitare la mattina. Alta volatilità."),
+        "NAS100": ("15:30 - 22:00", "Apertura Wall Street. Evitare la mattina. Alta volatilità."),
+        # Crypto
+        "ETHUSD": ("15:30 - 20:00", "Correlato al NAS100. Se il Nasdaq sale, ETH tende a seguirlo."),
+    }
+
     # ── Top Continuation Rate (>= 67%) per timeframe ──────────────
     st.markdown("### 🏆 Top Continuation Rate (≥ 67%)")
 
@@ -205,17 +241,42 @@ if data:
                     "category": "Categoria",
                     tf: "Cont. Rate"
                 }, inplace=True)
+
+                # Add trading session columns for 5min and 1min only
+                if tf in ("5min", "1min"):
+                    top_df["Orario Migliore"] = top_df["Asset"].map(
+                        lambda x: TRADING_SESSIONS.get(x, ("—", "—"))[0]
+                    )
+                    top_df["Note"] = top_df["Asset"].map(
+                        lambda x: TRADING_SESSIONS.get(x, ("—", "—"))[1]
+                    )
+
                 st.markdown(f"**{tf}**")
-                st.dataframe(
-                    top_df,
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Asset": st.column_config.TextColumn(width="large"),
-                        "Categoria": st.column_config.TextColumn(width="large"),
-                        "Cont. Rate": st.column_config.TextColumn(width="large"),
-                    },
-                )
+
+                if tf in ("5min", "1min"):
+                    st.dataframe(
+                        top_df,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Asset": st.column_config.TextColumn(width="small"),
+                            "Categoria": st.column_config.TextColumn(width="medium"),
+                            "Cont. Rate": st.column_config.TextColumn(width="small"),
+                            "Orario Migliore": st.column_config.TextColumn(width="medium"),
+                            "Note": st.column_config.TextColumn(width="large"),
+                        },
+                    )
+                else:
+                    st.dataframe(
+                        top_df,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Asset": st.column_config.TextColumn(width="large"),
+                            "Categoria": st.column_config.TextColumn(width="large"),
+                            "Cont. Rate": st.column_config.TextColumn(width="large"),
+                        },
+                    )
             else:
                 st.markdown(f"**{tf}** — Nessun asset ≥ 67%")
 
