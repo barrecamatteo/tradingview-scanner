@@ -19,6 +19,8 @@ from src.config.assets import ASSETS, TIMEFRAMES, get_total_combinations
 
 # All timeframe labels in display order
 ALL_TF_LABELS = ["4H", "1H", "15min", "5min", "1min"]
+WEEKLY_TF = ["4H", "1H", "15min"]
+DAILY_TF = ["5min", "1min"]
 
 # ── Page Config ───────────────────────────────────────────────────────
 st.set_page_config(
@@ -48,9 +50,6 @@ st.markdown("""
         color: white;
         text-align: center;
     }
-    .rate-high { background-color: #28a745 !important; color: white; }
-    .rate-medium { background-color: #ffc107 !important; color: black; }
-    .rate-low { background-color: #dc3545 !important; color: white; }
 
     /* Table styling */
     .dataframe td { text-align: center !important; }
@@ -73,24 +72,27 @@ def get_db() -> SupabaseDB:
     return st.session_state.db
 
 
-def color_rate(val):
-    """Color code continuation rate values."""
-    if pd.isna(val) or val is None:
-        return "background-color: #6c757d; color: white"
-    val = float(val)
-    if val >= 65:
-        return "background-color: #28a745; color: white"
-    elif val >= 55:
-        return "background-color: #ffc107; color: black"
-    else:
-        return "background-color: #dc3545; color: white"
-
-
 def format_rate(val):
     """Format rate value with percentage sign."""
     if pd.isna(val) or val is None:
         return "—"
     return f"{float(val):.1f}%"
+
+
+def get_last_scan_date(db, timeframes):
+    """Get the most recent scan date for a set of timeframes."""
+    try:
+        rates = db.client.table("continuation_rates").select(
+            "updated_at"
+        ).in_("timeframe", timeframes).order(
+            "updated_at", desc=True
+        ).limit(1).execute()
+
+        if rates.data and rates.data[0].get("updated_at"):
+            return rates.data[0]["updated_at"][:16].replace("T", " ")
+    except Exception:
+        pass
+    return "Mai"
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────
@@ -103,8 +105,6 @@ with st.sidebar:
     # Check for environment variables
     tv_user = os.getenv("TV_USERNAME", "")
     tv_pass = os.getenv("TV_PASSWORD", "")
-    sb_url = os.getenv("SUPABASE_URL", "")
-    sb_key = os.getenv("SUPABASE_KEY", "")
 
     if not tv_user:
         tv_user = st.text_input("TradingView Username", type="default")
@@ -143,41 +143,25 @@ with st.sidebar:
             for a in assets_list:
                 st.text(f"  {a['name']}")
 
-    st.markdown("---")
-    st.markdown("### 📖 Database Schema")
-    if st.button("Show SQL Schema"):
-        db = get_db()
-        if db:
-            st.code(db.get_schema_sql(), language="sql")
-
 # ── Main Content ──────────────────────────────────────────────────────
 
-st.markdown('<div class="main-header">📊 TradingView Continuation Rate Scanner</div>', unsafe_allow_html=True)
-st.markdown("Automated extraction of SMC Continuation Rates across 25 assets × 5 timeframes")
-
-# Top metrics row
-col1, col2, col3, col4 = st.columns(4)
+st.markdown('<div class="main-header">📊 Continuation Rates</div>', unsafe_allow_html=True)
 
 db = get_db()
-last_scan = None
-if db:
-    try:
-        last_scan = db.get_last_scan()
-    except Exception:
-        pass
+
+# Top metrics: Assets, Timeframes, Weekly Update, Daily Update
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.metric("Assets", len([a for cat in ASSETS.values() for a in cat]))
 with col2:
     st.metric("Timeframes", len(TIMEFRAMES))
 with col3:
-    st.metric("Total Scans", get_total_combinations())
+    weekly_date = get_last_scan_date(db, WEEKLY_TF) if db else "Mai"
+    st.metric("Weekly Update", weekly_date)
 with col4:
-    if last_scan and last_scan.get("completed_at"):
-        ts = last_scan["completed_at"][:16].replace("T", " ")
-        st.metric("Last Update", ts)
-    else:
-        st.metric("Last Update", "Never")
+    daily_date = get_last_scan_date(db, DAILY_TF) if db else "Mai"
+    st.metric("Daily Update", daily_date)
 
 st.markdown("---")
 
@@ -189,6 +173,12 @@ with scan_col1:
     scan_button = st.button("🔄 Aggiorna Dati", type="primary", use_container_width=True)
 
 with scan_col2:
+    last_scan = None
+    if db:
+        try:
+            last_scan = db.get_last_scan()
+        except Exception:
+            pass
     if last_scan:
         status_icon = "✅" if last_scan["status"] == "completed" else "⚠️"
         st.info(
@@ -204,7 +194,6 @@ if scan_button:
     elif not scan_tfs:
         st.error("⚠️ Please select at least one timeframe.")
     else:
-        # Set credentials as env vars for the scanner
         os.environ["TV_USERNAME"] = tv_user
         os.environ["TV_PASSWORD"] = tv_pass
 
@@ -237,7 +226,6 @@ if scan_button:
                 f"successful extractions."
             )
 
-            # Store results in session state for display
             st.session_state.scan_results = scanner.get_results_as_pivot()
             st.rerun()
 
@@ -249,7 +237,6 @@ if scan_button:
 
 st.markdown("## 📊 Continuation Rates")
 
-# Try to load from database first, then from session state
 data = None
 
 if db:
@@ -265,34 +252,27 @@ if data:
     df = pd.DataFrame(data)
 
     # ── Filters ───────────────────────────────────────────────────
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    filter_col1, filter_col2 = st.columns(2)
 
     with filter_col1:
-        categories = ["All"] + sorted(df["category"].unique().tolist())
-        selected_cat = st.selectbox("Filter by Category", categories)
+        categories = ["Tutti"] + sorted(df["category"].unique().tolist())
+        selected_cat = st.selectbox("Filtra per Categoria", categories)
 
     with filter_col2:
-        min_rate = st.slider("Min Avg Rate (%)", 0.0, 100.0, 0.0, 0.5)
-
-    with filter_col3:
-        sort_options = ["Category", "Asset"] + ALL_TF_LABELS + ["Avg (desc)", "Avg (asc)"]
-        sort_by = st.selectbox("Sort by", sort_options)
+        sort_options = ["Categoria", "Asset"] + ALL_TF_LABELS + ["Avg (desc)", "Avg (asc)"]
+        sort_by = st.selectbox("Ordina per", sort_options)
 
     # Apply filters
-    if selected_cat != "All":
+    if selected_cat != "Tutti":
         df = df[df["category"] == selected_cat]
-
-    if min_rate > 0:
-        df = df[df["avg"].fillna(0) >= min_rate]
 
     # Apply sorting
     sort_map = {
-        "Category": ("category", True),
+        "Categoria": ("category", True),
         "Asset": ("asset", True),
         "Avg (desc)": ("avg", False),
         "Avg (asc)": ("avg", True),
     }
-    # Add timeframe sorts
     for tf in ALL_TF_LABELS:
         sort_map[tf] = (tf, False)
 
@@ -302,40 +282,33 @@ if data:
 
     # ── Display Table ─────────────────────────────────────────────
 
-    # Format for display
     display_df = df.copy()
-    rename_map = {
-        "category": "Category",
-        "asset": "Asset",
-        "avg": "Average",
-        "updated_at": "Last Update",
-    }
-    # Keep timeframe column names as-is
-    display_df.rename(columns=rename_map, inplace=True)
 
-    # Format percentage columns
-    rate_cols = ALL_TF_LABELS + ["Average"]
-    for col in rate_cols:
+    # Select and order columns: Asset, Category, 4H, 1H, 15min, 5min, 1min
+    display_columns = ["asset", "category"] + ALL_TF_LABELS
+    available_cols = [c for c in display_columns if c in display_df.columns]
+    display_df = display_df[available_cols]
+
+    # Rename
+    display_df.rename(columns={
+        "category": "Categoria",
+        "asset": "Asset",
+    }, inplace=True)
+
+    # Format ALL percentage columns (including 5min and 1min)
+    for col in ALL_TF_LABELS:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(format_rate)
 
-    # Format timestamp
-    if "Last Update" in display_df.columns:
-        display_df["Last Update"] = display_df["Last Update"].apply(
-            lambda x: str(x)[:16].replace("T", " ") if x else "—"
-        )
-
-    # Build column config
+    # Column config
     col_config = {
-        "Category": st.column_config.TextColumn(width="medium"),
+        "Categoria": st.column_config.TextColumn(width="medium"),
         "Asset": st.column_config.TextColumn(width="small"),
-        "Average": st.column_config.TextColumn(width="small"),
     }
     for tf in ALL_TF_LABELS:
         if tf in display_df.columns:
             col_config[tf] = st.column_config.TextColumn(width="small")
 
-    # Style the dataframe
     st.dataframe(
         display_df,
         use_container_width=True,
@@ -346,7 +319,6 @@ if data:
     # ── Summary Stats ─────────────────────────────────────────────
     st.markdown("### 📈 Summary Statistics")
 
-    # Show stats for all available timeframes
     stat_cols = st.columns(len(ALL_TF_LABELS))
     for i, tf in enumerate(ALL_TF_LABELS):
         with stat_cols[i]:
@@ -359,21 +331,24 @@ if data:
             else:
                 st.metric(f"Avg {tf}", "—")
 
-    # ── Top/Bottom performers ─────────────────────────────────────
-    if "avg" in df.columns and df["avg"].notna().any():
-        perf_col1, perf_col2 = st.columns(2)
+    # ── Top Continuation Rate (>= 67%) per timeframe ──────────────
+    st.markdown("### 🏆 Top Continuation Rate (≥ 67%)")
 
-        with perf_col1:
-            st.markdown("#### 🏆 Top 5 (by Average)")
-            top5 = df.nlargest(5, "avg")[["asset", "category", "avg"]]
-            top5["avg"] = top5["avg"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(top5, hide_index=True, use_container_width=True)
-
-        with perf_col2:
-            st.markdown("#### ⚠️ Bottom 5 (by Average)")
-            bottom5 = df.nsmallest(5, "avg")[["asset", "category", "avg"]]
-            bottom5["avg"] = bottom5["avg"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(bottom5, hide_index=True, use_container_width=True)
+    for tf in ALL_TF_LABELS:
+        if tf in df.columns:
+            top_df = df[df[tf].notna() & (df[tf] >= 67)][["asset", "category", tf]].copy()
+            if not top_df.empty:
+                top_df = top_df.sort_values(tf, ascending=False)
+                top_df[tf] = top_df[tf].apply(lambda x: f"{x:.1f}%")
+                top_df.rename(columns={
+                    "asset": "Asset",
+                    "category": "Categoria",
+                    tf: "Cont. Rate"
+                }, inplace=True)
+                st.markdown(f"**{tf}**")
+                st.dataframe(top_df, hide_index=True, use_container_width=True)
+            else:
+                st.markdown(f"**{tf}** — Nessun asset ≥ 67%")
 
     # ── Export ────────────────────────────────────────────────────
     st.markdown("---")
@@ -432,7 +407,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #6c757d; font-size: 0.8rem;'>"
     "TradingView Continuation Rate Scanner | SMC Market Structure Analysis | "
-    "DOM Extraction v2.0"
+    "CSV Extraction v3.0"
     "</div>",
     unsafe_allow_html=True,
 )
