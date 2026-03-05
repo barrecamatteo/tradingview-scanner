@@ -1,8 +1,13 @@
-name: Scheduled TradingView Scan
+name: Weekly Scan (4H/1H/15min)
 
 on:
   # Manual trigger
   workflow_dispatch:
+    inputs:
+      timeframes:
+        description: 'Timeframes to scan (space-separated)'
+        required: false
+        default: '4H 1H 15min'
 
   # Scheduled: Every Monday at 06:00 UTC (07:00 Rome)
   schedule:
@@ -48,14 +53,14 @@ jobs:
           echo "$TV_COOKIES" | base64 -d > data/tv_cookies.json
           echo "Cookies restored to data/tv_cookies.json"
 
-      - name: Run scan
+      - name: Run weekly scan (4H/1H/15min)
         run: |
-          python run_scan.py
+          python run_scan.py --timeframes ${{ github.event.inputs.timeframes || '4H 1H 15min' }} --method dom
 
       - name: Upload debug screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scan-screenshots
+          name: weekly-scan-screenshots
           path: data/screenshots/
           retention-days: 7
