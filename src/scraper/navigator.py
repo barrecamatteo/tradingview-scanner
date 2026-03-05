@@ -86,11 +86,14 @@ class ChartNavigator:
             logger.error(f"Failed to load initial chart: {e}")
             return False
 
-    def navigate_to_chart(self, symbol: str, interval: str) -> bool:
+    def navigate_to_chart(self, symbol: str, interval: str, indicator_wait: int = 4) -> bool:
         """Navigate to a specific symbol/timeframe WITHOUT reloading the page.
 
         Uses TradingView's UI controls to change symbol and timeframe,
         preserving the indicator layout.
+        
+        Args:
+            indicator_wait: Seconds to wait for indicators to calculate.
         """
         if not self._chart_loaded:
             if not self.initial_load():
@@ -104,7 +107,7 @@ class ChartNavigator:
                     logger.error(f"Failed to change symbol to {symbol}")
                     return False
                 self._current_symbol = symbol
-                time.sleep(3)  # Wait for new symbol data to load
+                time.sleep(2)  # Wait for new symbol data
 
             # Change timeframe if needed
             if self._current_interval != interval:
@@ -112,10 +115,10 @@ class ChartNavigator:
                     logger.error(f"Failed to change timeframe to {interval}")
                     return False
                 self._current_interval = interval
-                time.sleep(3)  # Wait for new timeframe data to load
+                time.sleep(2)  # Wait for new timeframe data
 
-            # Extra wait for indicators to recalculate
-            time.sleep(SCRAPER_CONFIG.get("indicator_wait_timeout", 10))
+            # Wait for indicators to recalculate
+            time.sleep(indicator_wait)
             return True
 
         except Exception as e:
@@ -180,31 +183,30 @@ class ChartNavigator:
             return False
 
     def _change_timeframe(self, interval: str) -> bool:
-        """Change the chart timeframe using TradingView's timeframe input.
+        """Change the chart timeframe by typing the interval number.
 
-        Types the interval value directly in the timeframe input.
+        TradingView accepts typed numbers when the chart has focus.
         """
         try:
-            # Method 1: Click on the timeframe display and type the new value
-            # The timeframe button/input is in the top toolbar
+            # Click on the chart area first to ensure it has focus
             try:
-                tf_btn = self.driver.find_element(
-                    By.CSS_SELECTOR,
-                    "[id='header-toolbar-intervals'] button[class*='isActive'], "
-                    "[data-name='time-interval-menu'], "
-                    "[class*='timeInterval']"
+                chart = self.driver.find_element(
+                    By.CSS_SELECTOR, "canvas, [class*='chart']"
                 )
-                tf_btn.click()
-                time.sleep(1)
-            except NoSuchElementException:
+                chart.click()
+                time.sleep(0.5)
+            except Exception:
                 pass
 
-            # Type the interval value - TradingView accepts typed numbers
-            # for timeframe change when chart is focused
-            body = self.driver.find_element(By.TAG_NAME, "body")
-            body.send_keys(interval)
+            # Type the interval value and press Enter
+            actions = ActionChains(self.driver)
+            actions.send_keys(interval)
+            actions.perform()
             time.sleep(0.5)
-            body.send_keys(Keys.ENTER)
+
+            actions = ActionChains(self.driver)
+            actions.send_keys(Keys.ENTER)
+            actions.perform()
             time.sleep(1)
 
             logger.info(f"Timeframe changed to {interval}")
