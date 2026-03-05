@@ -78,6 +78,15 @@ class TradingViewBrowser:
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
         )
+
+        # Enable file downloads in headless mode
+        if self._download_dir and self.headless:
+            self.driver.execute_cdp_cmd(
+                "Page.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": self._download_dir},
+            )
+            logger.info(f"Headless download enabled to: {self._download_dir}")
+
         self.driver.set_page_load_timeout(90)
         logger.info("Chrome WebDriver initialized")
 
