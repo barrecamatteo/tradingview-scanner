@@ -80,12 +80,28 @@ class TradingViewBrowser:
         )
 
         # Enable file downloads in headless mode
-        if self._download_dir and self.headless:
-            self.driver.execute_cdp_cmd(
-                "Page.setDownloadBehavior",
-                {"behavior": "allow", "downloadPath": self._download_dir},
-            )
-            logger.info(f"Headless download enabled to: {self._download_dir}")
+        if self._download_dir:
+            abs_download_dir = os.path.abspath(self._download_dir)
+            os.makedirs(abs_download_dir, exist_ok=True)
+
+            # Try multiple CDP commands for different Chrome versions
+            try:
+                self.driver.execute_cdp_cmd(
+                    "Browser.setDownloadBehavior",
+                    {"behavior": "allow", "downloadPath": abs_download_dir, "eventsEnabled": True},
+                )
+                logger.info(f"Download enabled (Browser.setDownloadBehavior): {abs_download_dir}")
+            except Exception:
+                try:
+                    self.driver.execute_cdp_cmd(
+                        "Page.setDownloadBehavior",
+                        {"behavior": "allow", "downloadPath": abs_download_dir},
+                    )
+                    logger.info(f"Download enabled (Page.setDownloadBehavior): {abs_download_dir}")
+                except Exception as e:
+                    logger.warning(f"Could not set download behavior: {e}")
+
+            self._abs_download_dir = abs_download_dir
 
         self.driver.set_page_load_timeout(90)
         logger.info("Chrome WebDriver initialized")
