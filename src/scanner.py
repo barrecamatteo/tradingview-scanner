@@ -11,7 +11,7 @@ from .scraper.browser import TradingViewBrowser
 from .scraper.navigator import ChartNavigator
 from .scraper.extractor import ContRateExtractor
 from .database.supabase_client import SupabaseDB
-from .config.assets import get_all_assets, TIMEFRAMES, SCRAPER_CONFIG
+from .config.assets import get_all_assets, get_timeframes, SCRAPER_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +61,14 @@ class TradingViewScanner:
     def __init__(
         self,
         headless: bool = True,
-        extraction_method: str = "ocr",
+        extraction_method: str = "dom",
         use_database: bool = True,
+        timeframe_filter: List[str] = None,
     ):
         self.headless = headless
         self.extraction_method = extraction_method
         self.use_database = use_database
+        self.timeframe_filter = timeframe_filter
 
         self.browser: Optional[TradingViewBrowser] = None
         self.navigator: Optional[ChartNavigator] = None
@@ -89,10 +91,12 @@ class TradingViewScanner:
     def run_full_scan(self) -> List[ScanResult]:
         """
         Execute a complete scan of all assets and timeframes.
+        Respects timeframe_filter if set.
         Returns list of ScanResult objects.
         """
         assets = get_all_assets()
-        total = len(assets) * len(TIMEFRAMES)
+        timeframes = get_timeframes(self.timeframe_filter)
+        total = len(assets) * len(timeframes)
         self.results = []
         scan_id = None
         successful = 0
@@ -103,7 +107,10 @@ class TradingViewScanner:
             self._report_progress(0, total, "Initializing browser...")
             self.browser = TradingViewBrowser(headless=self.headless)
             self.navigator = ChartNavigator(self.browser.get_driver())
-            self.extractor = ContRateExtractor(method=self.extraction_method)
+
+            # Only init OCR extractor if needed
+            if self.extraction_method != "dom":
+                self.extractor = ContRateExtractor(method=self.extraction_method)
 
             if self.use_database:
                 self.db = SupabaseDB()
@@ -117,10 +124,19 @@ class TradingViewScanner:
             # Dismiss any popups
             self.navigator.dismiss_popups()
 
+            # Open Data Window for DOM extraction
+            if self.extraction_method == "dom":
+                self._report_progress(0, total, "Opening Data Window...")
+                if not self.navigator.open_data_window():
+                    logger.warning(
+                        "Could not auto-open Data Window, "
+                        "will try on first chart load"
+                    )
+
             # Iterate through all combinations
             current = 0
             for category, symbol, asset_name in assets:
-                for tf_label, tf_interval in TIMEFRAMES.items():
+                for tf_label, tf_interval in timeframes.items():
                     current += 1
                     self._report_progress(
                         current, total,
@@ -145,7 +161,9 @@ class TradingViewScanner:
             if self.db and scan_id:
                 self.db.complete_scan(scan_id, successful, failed)
 
-            self._report_progress(total, total, f"Scan complete! {successful}/{total} successful")
+            self._report_progress(
+                total, total, f"Scan complete! {successful}/{total} successful"
+            )
 
         except Exception as e:
             logger.error(f"Scan failed: {e}")
@@ -192,15 +210,21 @@ class TradingViewScanner:
                 # Dismiss popups that might have appeared
                 self.navigator.dismiss_popups()
 
-                # Take screenshot of analysis panel
-                screenshot = self.navigator.get_analysis_panel_screenshot()
-
-                # Extract Cont. Rate
-                cont_rate, confidence = self.extractor.extract_cont_rate(
-                    screenshot,
-                    asset_name=asset_name,
-                    timeframe=tf_label,
-                )
+                # Extract Cont. Rate based on method
+                if self.extraction_method == "dom":
+                    # DOM extraction: fast & accurate
+                    # Try to open Data Window if not already open
+                    self.navigator.open_data_window()
+                    time.sleep(1)  # Brief wait for Data Window to populate
+                    cont_rate, confidence = self.navigator.get_cont_rate_from_dom()
+                else:
+                    # OCR/AI Vision fallback
+                    screenshot = self.navigator.get_analysis_panel_screenshot()
+                    cont_rate, confidence = self.extractor.extract_cont_rate(
+                        screenshot,
+                        asset_name=asset_name,
+                        timeframe=tf_label,
+                    )
 
                 if cont_rate is not None:
                     return ScanResult(
@@ -254,10 +278,13 @@ class TradingViewScanner:
                 scan_batch_id=scan_id,
             )
         except Exception as e:
-            logger.error(f"Failed to save result for {result.asset}@{result.timeframe}: {e}")
+            logger.error(
+                f"Failed to save result for {result.asset}@{result.timeframe}: {e}"
+            )
 
     def get_results_as_pivot(self) -> List[Dict]:
         """Convert scan results to pivot table format."""
+        all_tf_labels = ["4H", "1H", "15min", "5min", "1min"]
         asset_data = {}
 
         for r in self.results:
@@ -265,19 +292,20 @@ class TradingViewScanner:
                 asset_data[r.asset] = {
                     "asset": r.asset,
                     "category": r.category,
-                    "4H": None,
-                    "1H": None,
-                    "15min": None,
                 }
+                for tf in all_tf_labels:
+                    asset_data[r.asset][tf] = None
             if r.cont_rate is not None:
                 asset_data[r.asset][r.timeframe] = r.cont_rate
 
         # Calculate averages
         for asset in asset_data.values():
             values = [
-                v for v in [asset["4H"], asset["1H"], asset["15min"]]
-                if v is not None
+                asset[tf] for tf in all_tf_labels
+                if asset.get(tf) is not None
             ]
             asset["avg"] = round(sum(values) / len(values), 1) if values else None
 
-        return sorted(asset_data.values(), key=lambda x: (x["category"], x["asset"]))
+        return sorted(
+            asset_data.values(), key=lambda x: (x["category"], x["asset"])
+        )
