@@ -109,22 +109,25 @@ class TradingViewBrowser:
     def login(self, username: str = None, password: str = None) -> bool:
         """
         Login to TradingView.
-        First attempts session restoration from cookies/profile.
-        Falls back to credential-based login.
+        Always restores cookies first (most reliable for GitHub Actions),
+        then verifies on a chart page.
         """
         username = username or os.getenv("TV_USERNAME")
         password = password or os.getenv("TV_PASSWORD")
 
-        # Check if already logged in (persistent profile)
-        if self._is_logged_in():
-            logger.info("Already logged in via persistent session")
-            return True
-
-        # Try cookie restoration
+        # Always try cookie restoration first (don't trust cached profile)
         if self._restore_cookies():
-            if self._is_logged_in():
+            # Verify by loading a chart page (not just homepage)
+            if self._verify_chart_access():
                 logger.info("Logged in via restored cookies")
                 return True
+            else:
+                logger.warning("Cookies restored but chart access failed")
+
+        # Check if maybe already logged in via profile
+        if self._verify_chart_access():
+            logger.info("Already logged in via persistent session")
+            return True
 
         # Credential-based login
         if not username or not password:
@@ -133,29 +136,42 @@ class TradingViewBrowser:
 
         return self._login_with_credentials(username, password)
 
-    def _is_logged_in(self) -> bool:
-        """Check if currently logged in to TradingView."""
+    def _verify_chart_access(self) -> bool:
+        """Verify login by loading a chart page and checking for Premium features."""
         try:
-            self.driver.get("https://www.tradingview.com/")
-            time.sleep(3)
+            self.driver.get("https://www.tradingview.com/chart/")
+            time.sleep(5)
 
-            # Check for user menu (indicates logged in)
+            page_source = self.driver.page_source.lower()
+
+            # Check for unauthenticated / Basic plan indicators
+            if "can't open this chart layout" in page_source:
+                logger.info("Chart access denied - not logged in")
+                return False
+            if "upgrade your plan" in page_source:
+                logger.info("Chart shows upgrade prompt - session may be Basic")
+                return False
+
+            # Check for chart canvas (indicates chart loaded successfully)
             try:
-                self.driver.find_element(By.CSS_SELECTOR, "[data-name='header-user-menu-button']")
+                self.driver.find_element(By.CSS_SELECTOR, "canvas")
+                logger.info("Chart loaded successfully - session valid")
                 return True
             except NoSuchElementException:
                 pass
 
-            # Alternative check
+            # Fallback: check for user menu
             try:
-                self.driver.find_element(By.CSS_SELECTOR, ".tv-header__user-menu-button")
+                self.driver.find_element(
+                    By.CSS_SELECTOR, "[data-name='header-user-menu-button']"
+                )
                 return True
             except NoSuchElementException:
                 pass
 
             return False
         except Exception as e:
-            logger.warning(f"Error checking login status: {e}")
+            logger.warning(f"Error verifying chart access: {e}")
             return False
 
     def _login_with_credentials(self, username: str, password: str) -> bool:
@@ -257,10 +273,13 @@ class TradingViewBrowser:
             logger.warning(f"Failed to save cookies: {e}")
 
     def _restore_cookies(self) -> bool:
-        """Restore cookies from file."""
+        """Restore cookies from file with detailed logging."""
         try:
             if not COOKIES_PATH.exists():
+                logger.info(f"No cookies file at {COOKIES_PATH}")
                 return False
+
+            logger.info(f"Loading cookies from {COOKIES_PATH}")
 
             self.driver.get("https://www.tradingview.com/")
             time.sleep(2)
@@ -268,18 +287,25 @@ class TradingViewBrowser:
             with open(COOKIES_PATH, "r") as f:
                 cookies = json.load(f)
 
+            logger.info(f"Found {len(cookies)} cookies to restore")
+
+            restored = 0
             for cookie in cookies:
                 try:
                     # Remove problematic fields
                     cookie.pop("sameSite", None)
                     cookie.pop("expiry", None)
                     self.driver.add_cookie(cookie)
+                    restored += 1
                 except Exception:
                     continue
 
+            logger.info(f"Restored {restored}/{len(cookies)} cookies")
+
+            # Refresh to apply cookies
+            logger.info("Cookies restored - checking session...")
             self.driver.refresh()
-            time.sleep(3)
-            logger.info("Cookies restored")
+            time.sleep(5)
             return True
         except Exception as e:
             logger.warning(f"Failed to restore cookies: {e}")
