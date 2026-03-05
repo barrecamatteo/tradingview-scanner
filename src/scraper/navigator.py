@@ -179,7 +179,8 @@ class ChartNavigator:
             return False
 
     def get_cont_rate_from_dom(
-        self, max_wait: int = 20, poll_interval: float = 2.0
+        self, max_wait: int = 20, poll_interval: float = 2.0,
+        asset_name: str = "", timeframe: str = ""
     ) -> Tuple[Optional[float], float]:
         """Extract Continuation Rate value directly from Data Window DOM.
 
@@ -189,6 +190,8 @@ class ChartNavigator:
         Args:
             max_wait: Maximum seconds to wait for the value to appear.
             poll_interval: Seconds between each poll attempt.
+            asset_name: For debug screenshot naming.
+            timeframe: For debug screenshot naming.
 
         Returns:
             Tuple of (cont_rate, confidence).
@@ -196,6 +199,7 @@ class ChartNavigator:
             confidence is 1.0 for DOM extraction (always accurate).
         """
         import math
+        import os
         attempts = math.ceil(max_wait / poll_interval)
 
         for attempt in range(attempts):
@@ -221,6 +225,57 @@ class ChartNavigator:
                     f"retry {attempt + 1}/{attempts}..."
                 )
                 time.sleep(poll_interval)
+
+        # Debug: save screenshot and DOM dump on failure
+        try:
+            debug_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__)
+                ))),
+                "data", "screenshots"
+            )
+            os.makedirs(debug_dir, exist_ok=True)
+
+            # Save screenshot
+            debug_name = f"debug_{asset_name}_{timeframe}".replace(" ", "_")
+            screenshot_path = os.path.join(debug_dir, f"{debug_name}.png")
+            self.driver.save_screenshot(screenshot_path)
+            logger.info(f"Debug screenshot saved: {screenshot_path}")
+
+            # Log current URL
+            logger.warning(f"Current URL: {self.driver.current_url}")
+
+            # Log what's visible in Data Window area
+            try:
+                # Find all data-test-id="value-title" elements
+                titles = self.driver.find_elements(
+                    By.CSS_SELECTOR, "[data-test-id*='value-title']"
+                )
+                if titles:
+                    logger.info(
+                        f"Data Window titles found: "
+                        f"{[t.text for t in titles[:10]]}"
+                    )
+                else:
+                    logger.warning("No data-test-id='value-title' elements found")
+
+                # Also check for any itemTitle elements
+                item_titles = self.driver.find_elements(
+                    By.CSS_SELECTOR, "[class*='itemTitle']"
+                )
+                if item_titles:
+                    logger.info(
+                        f"itemTitle elements: "
+                        f"{[t.text for t in item_titles[:10]]}"
+                    )
+                else:
+                    logger.warning("No itemTitle elements found")
+
+            except Exception as debug_err:
+                logger.warning(f"Debug DOM inspection failed: {debug_err}")
+
+        except Exception as debug_err:
+            logger.warning(f"Could not save debug info: {debug_err}")
 
         logger.warning(
             f"Could not find Continuation Rate in Data Window DOM "
