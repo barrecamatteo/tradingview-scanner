@@ -109,21 +109,41 @@ class TradingViewBrowser:
         return self._login_with_credentials(username, password)
 
     def _is_logged_in(self) -> bool:
-        """Check if currently logged in to TradingView."""
+        """Check if currently logged in to TradingView.
+        
+        Verifies by loading a chart page - if it shows the chart layout
+        error page, we're not logged in even if the homepage looks OK.
+        """
         try:
-            self.driver.get("https://www.tradingview.com/")
-            time.sleep(3)
+            # First check: try loading a chart page (most reliable)
+            self.driver.get("https://www.tradingview.com/chart/")
+            time.sleep(5)
 
-            # Check for user menu (indicates logged in)
+            # If we see "can't open this chart layout" or "log in", not logged in
+            page_source = self.driver.page_source.lower()
+            if "can't open this chart layout" in page_source:
+                logger.info("Login check: chart layout access denied")
+                return False
+            if "you need to log in" in page_source:
+                logger.info("Login check: login required")
+                return False
+
+            # Check for chart elements (indicates successful load = logged in)
             try:
-                self.driver.find_element(By.CSS_SELECTOR, "[data-name='header-user-menu-button']")
+                self.driver.find_element(
+                    By.CSS_SELECTOR,
+                    "[class*='chart-container'], canvas, [class*='chart-markup-table']"
+                )
+                logger.info("Login check: chart loaded successfully - session valid")
                 return True
             except NoSuchElementException:
                 pass
 
-            # Alternative check
+            # Fallback: check for user menu on current page
             try:
-                self.driver.find_element(By.CSS_SELECTOR, ".tv-header__user-menu-button")
+                self.driver.find_element(
+                    By.CSS_SELECTOR, "[data-name='header-user-menu-button']"
+                )
                 return True
             except NoSuchElementException:
                 pass
