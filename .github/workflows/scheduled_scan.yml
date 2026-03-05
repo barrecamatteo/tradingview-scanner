@@ -55,7 +55,7 @@ jobs:
 
       - name: Run weekly scan (4H/1H/15min)
         run: |
-          python run_scan.py --timeframes ${{ github.event.inputs.timeframes || '4H 1H 15min' }} --method dom
+          python run_scan.py --timeframes ${{ github.event.inputs.timeframes || '4H 1H 15min' }} --method csv
 
       - name: Upload debug screenshots
         if: always()
