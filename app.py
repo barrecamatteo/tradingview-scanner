@@ -230,6 +230,15 @@ if data:
     # ── Top Continuation Rate (>= 67%) per timeframe ──────────────
     st.markdown("### 🏆 Top Continuation Rate (≥ 67%)")
 
+    # Timeframe colors matching TradingView watchlist
+    TF_COLORS = {
+        "4H": "#9C27B0",     # Viola
+        "1H": "#FFC107",     # Giallo
+        "15min": "#4CAF50",  # Verde
+        "5min": "#2196F3",   # Blu
+        "1min": "#F44336",   # Rosso
+    }
+
     for tf in ALL_TF_LABELS:
         if tf in df.columns:
             top_df = df[df[tf].notna() & (df[tf] >= 67)][["asset", "category", tf]].copy()
@@ -251,7 +260,12 @@ if data:
                         lambda x: TRADING_SESSIONS.get(x, ("—", "—"))[1]
                     )
 
-                st.markdown(f"**{tf}**")
+                # Colored timeframe title
+                color = TF_COLORS.get(tf, "#FFFFFF")
+                st.markdown(
+                    f'<span style="color:{color}; font-size:1.3rem; font-weight:700;">● {tf}</span>',
+                    unsafe_allow_html=True,
+                )
 
                 if tf in ("5min", "1min"):
                     st.dataframe(
@@ -278,7 +292,12 @@ if data:
                         },
                     )
             else:
-                st.markdown(f"**{tf}** — Nessun asset ≥ 67%")
+                color = TF_COLORS.get(tf, "#FFFFFF")
+                st.markdown(
+                    f'<span style="color:{color}; font-size:1.3rem; font-weight:700;">● {tf}</span>'
+                    f' — Nessun asset ≥ 67%',
+                    unsafe_allow_html=True,
+                )
 
     # ── Export ────────────────────────────────────────────────────
     st.markdown("---")
