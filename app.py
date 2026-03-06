@@ -107,43 +107,20 @@ def show_login_page():
         st.markdown("*SMC Market Structure Analysis*")
         st.markdown("---")
 
-        # Tabs for Login / Register
-        tab_login, tab_register = st.tabs(["Accedi", "Registrati"])
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Accedi", use_container_width=True)
 
-        with tab_login:
-            with st.form("login_form"):
-                username = st.text_input("Username")
-                password = st.text_input("Password", type="password")
-                submit = st.form_submit_button("Accedi", use_container_width=True)
-
-                if submit:
-                    if not username or not password:
-                        st.error("Inserisci username e password")
-                    elif check_login(username, password):
-                        st.session_state.logged_in = True
-                        st.session_state.username = username
-                        st.rerun()
-                    else:
-                        st.error("Username o password errati")
-
-        with tab_register:
-            with st.form("register_form"):
-                new_username = st.text_input("Scegli Username")
-                new_password = st.text_input("Scegli Password", type="password")
-                confirm_password = st.text_input("Conferma Password", type="password")
-                register = st.form_submit_button("Registrati", use_container_width=True)
-
-                if register:
-                    if not new_username or not new_password:
-                        st.error("Compila tutti i campi")
-                    elif len(new_password) < 6:
-                        st.error("La password deve avere almeno 6 caratteri")
-                    elif new_password != confirm_password:
-                        st.error("Le password non corrispondono")
-                    elif register_user(new_username, new_password):
-                        st.success("✅ Registrazione completata! Ora puoi accedere.")
-                    else:
-                        st.error("Username già esistente o errore di registrazione")
+            if submit:
+                if not username or not password:
+                    st.error("Inserisci username e password")
+                elif check_login(username, password):
+                    st.session_state.logged_in = True
+                    st.session_state.username = username
+                    st.rerun()
+                else:
+                    st.error("Username o password errati")
 
 
 # ── Check Auth ────────────────────────────────────────────────────────
