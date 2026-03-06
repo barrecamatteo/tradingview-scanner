@@ -4,6 +4,7 @@ TradingView Continuation Rate Scanner - Streamlit Web App
 
 import os
 import sys
+import hashlib
 import logging
 import pandas as pd
 import streamlit as st
@@ -32,6 +33,133 @@ st.set_page_config(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# ══════════════════════════════════════════════════════════════════════
+# AUTH SYSTEM
+# ══════════════════════════════════════════════════════════════════════
+
+def hash_password(password: str) -> str:
+    """Hash a password with SHA-256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def get_db() -> SupabaseDB:
+    """Get or create Supabase client from session state."""
+    if "db" not in st.session_state:
+        try:
+            st.session_state.db = SupabaseDB()
+        except ValueError as e:
+            st.error(f"⚠️ Database not configured: {e}")
+            return None
+    return st.session_state.db
+
+
+def check_login(username: str, password: str) -> bool:
+    """Verify username and password against database."""
+    db = get_db()
+    if not db:
+        return False
+    try:
+        result = db.client.table("users").select("password_hash").eq(
+            "username", username
+        ).execute()
+        if result.data:
+            stored_hash = result.data[0]["password_hash"]
+            return stored_hash == hash_password(password)
+        return False
+    except Exception as e:
+        logger.error(f"Login check failed: {e}")
+        return False
+
+
+def register_user(username: str, password: str) -> bool:
+    """Register a new user in the database."""
+    db = get_db()
+    if not db:
+        return False
+    try:
+        db.client.table("users").insert({
+            "username": username,
+            "password_hash": hash_password(password),
+        }).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Registration failed: {e}")
+        return False
+
+
+def show_login_page():
+    """Display the login/registration page."""
+    st.markdown("""
+    <style>
+        .login-container {
+            max-width: 400px;
+            margin: 0 auto;
+            padding-top: 5rem;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col2:
+        st.markdown("## 📊 Continuation Rate Scanner")
+        st.markdown("*SMC Market Structure Analysis*")
+        st.markdown("---")
+
+        # Tabs for Login / Register
+        tab_login, tab_register = st.tabs(["Accedi", "Registrati"])
+
+        with tab_login:
+            with st.form("login_form"):
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Accedi", use_container_width=True)
+
+                if submit:
+                    if not username or not password:
+                        st.error("Inserisci username e password")
+                    elif check_login(username, password):
+                        st.session_state.logged_in = True
+                        st.session_state.username = username
+                        st.rerun()
+                    else:
+                        st.error("Username o password errati")
+
+        with tab_register:
+            with st.form("register_form"):
+                new_username = st.text_input("Scegli Username")
+                new_password = st.text_input("Scegli Password", type="password")
+                confirm_password = st.text_input("Conferma Password", type="password")
+                register = st.form_submit_button("Registrati", use_container_width=True)
+
+                if register:
+                    if not new_username or not new_password:
+                        st.error("Compila tutti i campi")
+                    elif len(new_password) < 6:
+                        st.error("La password deve avere almeno 6 caratteri")
+                    elif new_password != confirm_password:
+                        st.error("Le password non corrispondono")
+                    elif register_user(new_username, new_password):
+                        st.success("✅ Registrazione completata! Ora puoi accedere.")
+                    else:
+                        st.error("Username già esistente o errore di registrazione")
+
+
+# ── Check Auth ────────────────────────────────────────────────────────
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    show_login_page()
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# MAIN APP (only shown after login)
+# ══════════════════════════════════════════════════════════════════════
+
 # ── Custom CSS ────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -45,28 +173,11 @@ st.markdown("""
     /* Table styling */
     .dataframe td { text-align: center !important; }
     .dataframe th { text-align: center !important; background-color: #1f2937 !important; }
-
-    /* Equal width columns for Top CR tables */
-    .top-cr-table th, .top-cr-table td {
-        width: 33.33% !important;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ── Helper Functions ──────────────────────────────────────────────────
-
-def get_db() -> SupabaseDB:
-    """Get or create Supabase client from session state."""
-    if "db" not in st.session_state:
-        try:
-            st.session_state.db = SupabaseDB()
-        except ValueError as e:
-            st.error(f"⚠️ Database not configured: {e}")
-            st.info("Set SUPABASE_URL and SUPABASE_KEY in your environment or .env file.")
-            return None
-    return st.session_state.db
-
 
 def format_rate(val):
     """Format rate value with percentage sign."""
@@ -91,9 +202,16 @@ def get_last_scan_date(db, timeframes):
     return "Mai"
 
 
-# ── Main Content ──────────────────────────────────────────────────────
+# ── Header with logout ────────────────────────────────────────────────
 
-st.markdown('<div class="main-header">📊 Continuation Rates</div>', unsafe_allow_html=True)
+header_col1, header_col2 = st.columns([6, 1])
+with header_col1:
+    st.markdown('<div class="main-header">📊 Continuation Rates</div>', unsafe_allow_html=True)
+with header_col2:
+    if st.button("Logout", use_container_width=True):
+        st.session_state.logged_in = False
+        st.session_state.pop("username", None)
+        st.rerun()
 
 db = get_db()
 
